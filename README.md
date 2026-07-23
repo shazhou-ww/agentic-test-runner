@@ -14,8 +14,10 @@
 
 ```
 你：写个测试规格，验一下 my-tool 的 --version 和 --help
-Agent：写 YAML → atest run → 全过
-你：看一眼 trace → judge_prompt 写得对 → 放行
+Agent：写好了 YAML spec，你看一下
+你：judge_prompt 写得对，跑吧
+Agent：atest run → 全过
+你：看一眼 trace → 确认通过
 ```
 
 工作流变成：
