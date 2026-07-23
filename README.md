@@ -21,8 +21,9 @@ Agent：写 YAML → atest run → 全过
 工作流变成：
 
 1. **Agent 写 YAML** — 每步一条命令 + 一句自然语言描述预期
-2. **Agent 跑 `atest run`** — 持久 shell 执行，LLM 读输出判 PASS/FAIL
-3. **你 review trace** — JSONL 记录全量数据，命令、输出、判定理由、时间线，一目了然
+2. **你 review spec** — judge_prompt 够不够具体？命令验的到不到位？覆盖面够不够？
+3. **Agent 跑 `atest run`** — 持久 shell 执行，LLM 读输出判 PASS/FAIL
+4. **你 review trace** — JSONL 记录全量数据，命令、输出、判定理由、时间线，一目了然
 
 ```yaml
 name: "CLI 冒烟测试"
@@ -58,7 +59,7 @@ steps:
 装好后告诉我，然后帮我写 CLI 测试规格。
 ```
 
-Agent 会自行完成安装、配置 LLM 环境变量、加载 skill，然后等你给指令写 case。你只需要 review 它写的 YAML 和跑出来的 trace。
+Agent 会自行完成安装、配置 LLM 环境变量、加载 skill，然后等你给指令写 case。你负责两轮 review：先看 spec 写得好不好，跑完看 trace 确认结果。
 
 ---
 
