@@ -1,16 +1,28 @@
-# atest — 让 Agent 写 CLI 测试像写 YAML 一样简单
+# atest — 让 Agent 帮你回归 CLI 测试
 
 Define test cases in YAML. Execute commands in a persistent shell. Let an LLM judge PASS/FAIL. Get a JSONL trace. Replay traces anytime.
 
 ## 解决什么问题
 
-Agent 经常需要验证 CLI 工具的行为：版本输出对不对、命令组合有没有按预期工作、错误处理合不合理。传统做法是写 assertion 代码——解析输出、匹配字符串、处理边界条件——一个测试用例可能要 50 行代码，Agent 写起来慢，维护更慢。
+你在开发给 Agent 用的 CLI 工具。每次改完代码，要验证有没有改坏东西：
 
-**atest** 把这件事压缩成三步：
+- **手工回归太慢** — 每条命令手动跑、手动看输出，改一次验半天
+- **让 Agent 回归不稳定** — Agent 跑完一轮说"看起来正常"，但你不确定它真验了什么、验到什么程度
+- **回归过程不好审计** — 出了问题回头查，没有记录，只有 Agent 的一句"通过了"
 
-1. **写 YAML** — 每个步骤一条命令 + 一句自然语言描述预期结果
-2. **跑 `atest run`** — 命令在持久 shell 中执行，LLM 读输出做判定（PASS/FAIL）
-3. **看 trace** — JSONL 记录全量数据，可回放、可查询
+**atest** 让 Agent 自己写 YAML 测试规格、自己跑、自己判。你只需要 review 规格合不合理，然后看 trace 确认结果。
+
+```
+你：写个测试规格，验一下 my-tool 的 --version 和 --help
+Agent：写 YAML → atest run → 全过
+你：看一眼 trace → judge_prompt 写得对 → 放行
+```
+
+工作流变成：
+
+1. **Agent 写 YAML** — 每步一条命令 + 一句自然语言描述预期
+2. **Agent 跑 `atest run`** — 持久 shell 执行，LLM 读输出判 PASS/FAIL
+3. **你 review trace** — JSONL 记录全量数据，命令、输出、判定理由、时间线，一目了然
 
 ```yaml
 name: "CLI 冒烟测试"
@@ -23,7 +35,7 @@ steps:
     judge_prompt: "exit code 应为 1，输出应包含 'unknown flag'"
 ```
 
-不需要写解析逻辑，不需要正则匹配，不需要断言库。LLM 直接读命令输出做语义判定——它看得懂"版本号格式对不对"，比正则灵活得多。
+不需要写解析逻辑，不需要正则匹配，不需要断言库。LLM 直接读命令输出做语义判定。trace 就是审计记录。
 
 **核心设计**：
 
@@ -33,52 +45,20 @@ steps:
 - **trace 回放** — `atest show trace.jsonl` 完整复现运行时输出，不重跑命令
 - **FAIL 即停** — 一步失败后续不执行，teardown 照跑，不会把系统搞坏
 
-## Agent 如何快速上手
+## 快速上手
 
-### 1. 安装
-
-```bash
-npm install -g agentic-test-runner
-```
-
-命令名是 `atest`，需要 Node.js ≥18。
-
-### 2. 配 LLM
-
-atest 支持任何 OpenAI 兼容 API，三个环境变量：
-
-```bash
-export ATEST_API_KEY=sk-xxx
-export ATEST_BASE_URL=https://api.openai.com/v1   # 或任何兼容端点
-export ATEST_MODEL=gpt-4o                          # 或 glm-5.2 / claude-3.5 等
-```
-
-纯 transition step（无 `judge_prompt`）不需要 LLM 配置。
-
-### 3. 加载 Skill
-
-atest 的完整使用指南（YAML schema、judge_prompt 写法、trace 结构、pitfalls）打包在 repo 里的 skill 目录：
+把下面这段发给你的 Agent：
 
 ```
-shazhou-ww/agentic-test-runner → skill/agentic-test-runner/SKILL.md
+安装 atest 并加载它的 skill：
+1. npm install -g agentic-test-runner
+2. 读取 https://github.com/shazhou-ww/agentic-test-runner/blob/main/skill/agentic-test-runner/SKILL.md 并按照其中的指南工作
+3. 读取 https://github.com/shazhou-ww/agentic-test-runner/blob/main/README.md 了解完整 schema 和 CLI 用法
+
+装好后告诉我，然后帮我写 CLI 测试规格。
 ```
 
-Agent 将这个路径加入 skill 加载列表即可。Skill 内容覆盖：
-
-- 完整 YAML schema 和字段说明
-- judge_prompt 的好/坏示例
-- 输出裁剪技巧（防止 LLM context 爆炸）
-- trace JSONL 结构和 jq 查询示例
-- 常见 pitfalls
-
-### 4. 开跑
-
-```bash
-atest run my-test.yaml                    # 跑测试，输出到 stdout + trace
-atest show my-test-*.jsonl                # 回放 trace
-```
-
-exit code 0 = 全过，1 = 有失败。
+Agent 会自行完成安装、配置 LLM 环境变量、加载 skill，然后等你给指令写 case。你只需要 review 它写的 YAML 和跑出来的 trace。
 
 ---
 
