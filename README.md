@@ -143,7 +143,15 @@ exit code 0 = 全过，1 = 有失败。LLM 配置（API key 等）agent 会处�
 
 每次跑都会生成一个 JSONL trace 文件。stdout 是简版，trace 是完整记录。
 
-**stdout 示例：**
+### 最简单：`atest show`
+
+直接回放成人类可读格式，和运行时的 stdout 一模一样：
+
+```bash
+atest show my-test-*.jsonl
+```
+
+输出长这样：
 ```
 🧪 atest — LLM-judged CLI test runner
    Case: Basic checks
@@ -166,7 +174,9 @@ exit code 0 = 全过，1 = 有失败。LLM 配置（API key 等）agent 会处�
 📊 Trace: my-test-20260723-120000.jsonl
 ```
 
-**用 jq 查 trace：**
+### 高级：用 jq 查 trace
+
+trace 是 JSONL，每行一个 JSON 对象。想精确查某个字段时用 jq：
 
 ```bash
 # 总结果
@@ -183,9 +193,6 @@ jq -r 'select(.type=="step" and .index==3) | .stdout' my-test-*.jsonl
 
 # 看 retry 历史
 jq -r 'select(.type=="step" and .index==2) | "attempt \(.attempt): \(.judge_verdict) — \(.judge_reason)"' my-test-*.jsonl
-
-# 回放成人类可读格式
-atest show my-test-*.jsonl
 ```
 
 ## License
