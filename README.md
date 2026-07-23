@@ -1,6 +1,6 @@
 # atest — 让 Agent 帮你回归 CLI 测试
 
-Define test cases in YAML. Execute commands in a persistent shell. Let an LLM judge PASS/FAIL. Get a JSONL trace. Replay traces anytime.
+用 YAML 定义测试规格，在持久 shell 中执行命令，让 LLM 判定 PASS/FAIL。生成 JSONL trace，随时回放。
 
 ## 解决什么问题
 
@@ -61,62 +61,94 @@ Agent 会自行完成安装和配置，然后告诉你接下来可以怎么协�
 
 ---
 
-## Quick start
+## Spec 长什么样
+
+你 review agent 写的 YAML 时，会看到这些字段：
 
 ```yaml
-# my-test.yaml
-name: "Basic checks"
-description: "Verify CLI outputs"
-setup:
-  - "rm -rf /tmp/demo"
-  - "mkdir -p /tmp/demo"
-steps:
-  - command: "echo hello world"
-    judge_prompt: "输出应包含 'hello world'"
-    timeout: 5
-  - command: "cd /tmp/demo"
-  - command: "pwd"
-    judge_prompt: "输出应包含 /tmp/demo"
-  - command: "rm -rf /tmp/demo"
-teardown:
-  - "rm -rf /tmp/demo"
+name: "test case name"          # 必填
+description: "what this tests"  # 可选，给 LLM 的上下文
+
+cwd: ./workspace                # 可选，相对 spec 文件的位置
+
+setup:                          # 可选，步骤前执行（不判定）
+  - "mkdir -p /tmp/workspace"
+teardown:                       # 可选，总是执行（即使 FAIL）
+  - "rm -rf /tmp/workspace"
+
+steps:                          # 必填
+  - command: "some command"     #   必填，shell 命令
+    judge_prompt: "expected"    #   可选 — 不写就按 exit code 判（0=PASS）
+    timeout: 30                 #   可选，秒（默认 30）
+    retry:                      #   可选 — 异步重试
+      max: 3                    #     最多重试几次（默认 3）
+      interval: 10              #     每次等几秒（默认 10）
+      backoff: false            #     false=固定间隔, true=指数退避
 ```
+
+### 两种 step
+
+**有 judge_prompt** — LLM 读输出做语义判定。这是 review 重点：prompt 够不够具体？
+
+```yaml
+# ✅ 好 — 具体、可验证
+judge_prompt: "输出应包含版本号，格式为 x.y.z"
+judge_prompt: "exit code 应为 1，输出应包含 'Error: not found'"
+
+# ❌ 差 — 模糊
+judge_prompt: "看起来正常"
+```
+
+**没有 judge_prompt**（transition step）— 纯 exit code 判定，0=PASS 非0=FAIL。用于 cd、mkdir 等不需要语义判断的步骤。
+
+### retry
+
+异步操作（服务启动等）不用猜 `sleep N`，配 retry 让 step 轮询：
+
+```yaml
+- command: "curl -sf http://localhost:8080/health"
+  retry:
+    max: 10
+    interval: 5
+```
+
+有 judge_prompt + retry 时，LLM 可以返回 RETRY（"还没就绪，再等等"）而不是直接 FAIL。
+
+### ⚠️ 输出裁剪
+
+LLM 会看到**所有前序步骤的输出**。一条 `npm test` 输出几百行会撑爆 context。review 时注意命令有没有裁剪：
+
+```yaml
+# ✅ 好 — 裁剪过
+- command: "npm test 2>&1 | tail -20"
+  judge_prompt: "输出应包含 'all tests passed'"
+
+# ❌ 差 — 原始输出
+- command: "npm test"
+  judge_prompt: "所有测试通过"
+```
+
+## 怎么跑
+
+agent 通常会帮你跑，但你想自己跑也简单：
 
 ```bash
-# Set LLM config
-export ATEST_API_KEY=sk-xxx
-export ATEST_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-export ATEST_MODEL=glm-5.2
-
-# Run
-atest run my-test.yaml
-
-# Replay a trace as human-readable output
-atest show my-test-20260723-120000.jsonl
+atest run my-test.yaml                    # 跑测试
+atest show my-test-*.jsonl                # 回放 trace
 ```
 
-## Subcommands
+exit code 0 = 全过，1 = 有失败。LLM 配置（API key 等）agent 会处理好。
 
-| Command | Description |
-|---------|-------------|
-| `atest run <spec.yaml> [options]` | Execute spec, judge with LLM, write trace |
-| `atest show <trace.jsonl>` | Replay trace as human-readable stdout |
-| `atest -V, --version` | Print version |
-| `atest -h, --help` | Show help |
-| `atest run -h` | Show run options |
-| `atest show -h` | Show show usage |
+## 怎么看 trace
 
-## Output
+每次跑都会生成一个 JSONL trace 文件。stdout 是简版，trace 是完整记录。
 
-**stdout** — brief, human-readable (same for `run` and `show`):
+**stdout 示例：**
 ```
 🧪 atest — LLM-judged CLI test runner
    Case: Basic checks
    Steps: 4
    Judge: glm-5.2 @ https://...
-
-  [setup] $ rm -rf /tmp/demo
-  [setup] $ mkdir -p /tmp/demo
 
 ━━━ Step 1/4 ━━━
   $ echo hello world
@@ -134,149 +166,27 @@ atest show my-test-20260723-120000.jsonl
 📊 Trace: my-test-20260723-120000.jsonl
 ```
 
-**trace file** — verbose JSONL, one JSON object per line. Every line has a `timestamp`.
+**用 jq 查 trace：**
 
-Query with `jq`:
 ```bash
-# Check result
+# 总结果
 jq -r 'select(.type=="summary") | .result' my-test-*.jsonl
 
-# Show failed steps
+# 所有 step 的判定
+jq -r 'select(.type=="step") | "[\(.index)] attempt=\(.attempt) \(.judge_verdict): \(.judge_reason)"' my-test-*.jsonl
+
+# 只看失败的
 jq 'select(.type=="step" and .judge_verdict=="FAIL")' my-test-*.jsonl
 
-# Show per-step cwd
-jq -r 'select(.type=="step") | "[\(.index)] \(.cwd) $ \(.command)"' my-test-*.jsonl
+# 看某一步的完整输出
+jq -r 'select(.type=="step" and .index==3) | .stdout' my-test-*.jsonl
 
-# Show retry history for a step
+# 看 retry 历史
 jq -r 'select(.type=="step" and .index==2) | "attempt \(.attempt): \(.judge_verdict) — \(.judge_reason)"' my-test-*.jsonl
 
-# Replay as human-readable
-atest show my-test-20260723-120000.jsonl
+# 回放成人类可读格式
+atest show my-test-*.jsonl
 ```
-
-## YAML schema
-
-```yaml
-name: "test case name"          # required
-description: "what this tests"  # optional
-
-cwd: ./workspace                # optional, relative to spec file location
-
-setup:                          # optional, run before steps (not judged)
-  - "mkdir -p /tmp/workspace"
-teardown:                       # optional, always runs (even on FAIL)
-  - "rm -rf /tmp/workspace"
-
-steps:                          # required, TestStep[]
-  - command: "some command"     #   required, shell command
-    judge_prompt: "expected"    #   optional — if omitted, auto-judge by exit code
-    timeout: 30                 #   optional, seconds (default: 30)
-    retry:                      #   optional — retry config for async operations
-      max: 3                    #     max retries (default: 3)
-      interval: 10              #     seconds between retries (default: 10)
-      backoff: false            #     false=fixed, true=exponential (default: false)
-```
-
-### Two types of steps
-
-**Judged step** (has `judge_prompt`):
-```yaml
-- command: "echo hello"
-  judge_prompt: "输出应包含 'hello'"
-```
-LLM reads the output + judge_prompt and returns PASS/FAIL.
-
-**Transition step** (no `judge_prompt`):
-```yaml
-- command: "cd /tmp/project"
-- command: "mkdir -p build"
-```
-Auto-judged by exit code: 0 = PASS, non-zero = FAIL. No LLM call needed.
-
-### Retry / async steps
-
-Some operations are async — a service might need time to start, a resource might be creating. Instead of guessing `sleep N`, configure `retry` and let the step poll until ready.
-
-**How it works:**
-
-| Has `judge_prompt` | Has `retry` | RETRY triggered by | LLM call? |
-|:-:|:-:|---|:-:|
-| ✅ | ✅ | LLM returns `VERDICT: RETRY` | ✅ |
-| ✅ | ❌ | N/A (PASS/FAIL only) | ✅ |
-| ❌ | ✅ | exit code non-zero | ❌ |
-| ❌ | ❌ | N/A (PASS/FAIL only) | ❌ |
-
-**Transition step with retry** (no LLM needed — pure polling):
-```yaml
-- command: "curl -sf http://localhost:8080/health"
-  retry:
-    max: 10
-    interval: 5
-    backoff: false
-```
-Tries every 5s, up to 10 retries. Exit 0 = PASS, non-zero = RETRY.
-
-**Judged step with retry** (LLM can distinguish "not ready" vs "broken"):
-```yaml
-- command: "curl -s http://localhost:8080/api/status | jq -r '.state'"
-  judge_prompt: "输出应为 'running' 或 'healthy'"
-  retry:
-    max: 5
-    interval: 10
-    backoff: true    # 10s → 20s → 40s → 80s → 160s
-```
-LLM sees output like `"starting"` → returns RETRY → wait → try again. If output is `"error"`, LLM returns FAIL immediately (not RETRY).
-
-**Backoff:** `backoff: false` = fixed interval. `backoff: true` = exponential (`interval × 2^attempt`).
-
-### judge_prompt tips
-
-```yaml
-# ✅ Good — specific, verifiable
-judge_prompt: "输出应包含版本号，格式为 x.y.z"
-judge_prompt: "exit code 应为 1，输出应包含 'Error: not found'"
-judge_prompt: "输出应为 JSON 数组，包含至少 2 个元素"
-
-# ❌ Bad — vague
-judge_prompt: "看起来正常"
-judge_prompt: "应该工作"
-```
-
-### Control output size
-
-The LLM judge sees **all previous step outputs**. Trim long outputs:
-
-```yaml
-# ✅ Good — trimmed
-- command: "npm test 2>&1 | tail -20"
-  judge_prompt: "输出应包含 'all tests passed'"
-- command: "curl -s http://localhost:8080/health | jq '.status'"
-  judge_prompt: "输出应为 up 或 healthy"
-
-# ❌ Bad — untrimmed
-- command: "npm test"
-  judge_prompt: "所有测试通过"
-```
-
-## CLI options (run)
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `--api-key <key>` | LLM API key (or `ATEST_API_KEY` env) | env |
-| `--base-url <url>` | LLM endpoint (or `ATEST_BASE_URL` env) | env |
-| `--model <name>` | Model name (or `ATEST_MODEL` env) | env |
-| `-o, --output <path>` | JSONL trace path | `<stem>-<timestamp>.jsonl` |
-| `--no-trace` | Disable trace file | enabled |
-
-## Environment variables
-
-| Variable | Description |
-|----------|-------------|
-| `ATEST_API_KEY` | LLM API key |
-| `ATEST_BASE_URL` | LLM API endpoint |
-| `ATEST_MODEL` | LLM model name |
-
-CLI flags override environment variables. All three are required when LLM judgment is needed (steps with `judge_prompt`). Transition steps don't need LLM config.
 
 ## License
 
