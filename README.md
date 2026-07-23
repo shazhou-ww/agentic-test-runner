@@ -53,13 +53,11 @@ steps:
 ```
 安装 atest 并加载它的 skill：
 1. npm install -g agentic-test-runner
-2. 读取 https://github.com/shazhou-ww/agentic-test-runner/blob/main/skill/agentic-test-runner/SKILL.md 并按照其中的指南工作
-3. 读取 https://github.com/shazhou-ww/agentic-test-runner/blob/main/README.md 了解完整 schema 和 CLI 用法
-
-装好后告诉我，然后帮我写 CLI 测试规格。
+2. 从 https://github.com/shazhou-ww/agentic-test-runner 安装 skill（路径：skill/agentic-test-runner/SKILL.md）
+3. 学习完成后告诉我，你准备好怎么帮我用 atest 做 CLI 回归测试。
 ```
 
-Agent 会自行完成安装、配置 LLM 环境变量、加载 skill，然后等你给指令写 case。你负责两轮 review：先看 spec 写得好不好，跑完看 trace 确认结果。
+Agent 会自行完成安装和配置，然后告诉你接下来可以怎么协作。你负责两轮 review：先看 spec 写得好不好，跑完看 trace 确认结果。
 
 ---
 

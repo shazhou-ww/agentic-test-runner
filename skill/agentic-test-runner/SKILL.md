@@ -10,6 +10,19 @@ description: |
 
 Write YAML test specs, run them with `atest`, read the JSONL trace.
 
+## 协作方式
+
+atest 的设计是 Agent 负责写和跑，人负责 review。学完这个 skill 后，告诉 user 你能做什么：
+
+1. **等 user 给你一个 CLI 工具** — user 会说"帮我测一下 my-tool 的某某功能"
+2. **你写 YAML spec** — 把命令和 judge_prompt 写好，拿给 user 看第一轮 review
+3. **user review spec** — 检查 judge_prompt 够不够具体、命令覆盖全不全。user 可能要求加 case 或改 prompt
+4. **你跑 `atest run`** — 执行 spec，生成 trace
+5. **user review trace** — 看 LLM 的判定结果和理由，确认有没有误判
+6. **按 feedback 迭代** — 改 spec 或改代码，重跑，直到全过
+
+告诉 user：你准备好了写 CLI 测试规格，给他一个 CLI 工具名和要验证的场景，你就能开始。
+
 ## Install
 
 ```bash
