@@ -242,13 +242,17 @@ Steps run in a single bash process. `cd` and `export` persist across steps:
 ```yaml
 steps:
   - command: "cd /tmp && mkdir proj && cd proj"
-    # transition step, no judge_prompt
+    # transition step, no judge
   - command: "pwd"
-    judge_prompt: "输出应包含 /tmp/proj"
+    judge:
+      type: regex
+      expr: "/tmp/proj"
   - command: "echo 'data' > config.txt"
     # transition step
   - command: "cat config.txt"
-    judge_prompt: "输出应包含 'data'"
+    judge:
+      type: regex
+      expr: "data"
 ```
 
 ### No hardcoded absolute paths
@@ -262,20 +266,24 @@ setup:
   - "mkdir -p fixtures"
 steps:
   - command: "ls fixtures"
-    judge_prompt: "应列出至少 1 个文件"
+    judge:
+      type: llm
+      prompt: "应列出至少 1 个文件"
 
 # Or cd in a transition step
 steps:
   - command: "cd ./test-workspace"   # transition step
   - command: "pwd"
-    judge_prompt: "输出应包含 test-workspace"
+    judge:
+      type: regex
+      expr: "test-workspace"
 ```
 
 ## How to run atest
 
 ### Prerequisites
 
-Set LLM config via environment variables (required only for steps with `judge_prompt`):
+Set LLM config via environment variables (required only for steps with `judge type: llm`):
 
 ```bash
 export ATEST_API_KEY=sk-xxx
@@ -405,7 +413,7 @@ jq -r '"\(.timestamp) \(.type) \(.command // "")"' trace.jsonl
 
 1. **Output explosion** — a single `npm test` or `cat huge.json` can output hundreds of lines. The LLM context includes ALL previous step outputs. Always trim with `head`, `tail`, `grep`, or `jq`.
 
-2. **Failing transition steps** — if a transition step (no judge_prompt) returns non-zero, it FAILs immediately unless `retry` is configured. Make sure setup commands succeed.
+2. **Failing transition steps** — if a transition step (no judge) returns non-zero, it FAILs immediately unless `retry` is configured. Make sure setup commands succeed.
 
 3. **FAIL stops everything** — when a step FAILs, subsequent steps are not executed. Teardown still runs.
 

@@ -1,4 +1,4 @@
 node_modules/
-*.trace.jsonl
-.DS_Store
+dist/
 *.jsonl
+.DS_Store

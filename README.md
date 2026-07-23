@@ -15,7 +15,7 @@
 ```
 你：写个测试规格，验一下 my-tool 的 --version 和 --help
 Agent：写好了 YAML spec，你看一下
-你：judge_prompt 写得对，跑吧
+你：judge 写得对，跑吧
 Agent：atest run → 全过
 你：看一眼 trace → 确认通过
 ```
@@ -23,7 +23,7 @@ Agent：atest run → 全过
 工作流变成：
 
 1. **Agent 写 YAML** — 每步一条命令 + 一句自然语言描述预期
-2. **你 review spec** — judge_prompt 够不够具体？命令验的到不到位？覆盖面够不够？
+2. **你 review spec** — judge prompt 够不够具体？命令验的到不到位？覆盖面够不够？
 3. **Agent 跑 `atest run`** — 持久 shell 执行，LLM 读输出判 PASS/FAIL
 4. **你 review trace** — JSONL 记录全量数据，命令、输出、判定理由、时间线，一目了然
 
@@ -31,11 +31,17 @@ Agent：atest run → 全过
 name: "CLI 冒烟测试"
 steps:
   - command: "my-tool --version"
-    judge_prompt: "输出应包含版本号，格式为 x.y.z"
+    judge:
+      type: llm
+      prompt: "输出应包含版本号，格式为 x.y.z"
   - command: "my-tool --help 2>&1 | head -20"
-    judge_prompt: "应显示用法说明和至少 3 个选项"
+    judge:
+      type: llm
+      prompt: "应显示用法说明和至少 3 个选项"
   - command: "my-tool invalid-flag"
-    judge_prompt: "exit code 应为 1，输出应包含 'unknown flag'"
+    judge:
+      type: llm
+      prompt: "exit code 应为 1，输出应包含 'unknown flag'"
 ```
 
 不需要写解析逻辑，不需要正则匹配，不需要断言库。LLM 直接读命令输出做语义判定。trace 就是审计记录。
@@ -43,7 +49,8 @@ steps:
 **核心设计**：
 
 - **持久 shell** — 步骤间共享状态（`cd`、`export`、文件操作都保留），模拟真实工作流
-- **两种步骤** — 有 `judge_prompt` 的走 LLM 判定；没有的走 exit code 自动判定（省 token）
+- **三种 judge + transition** — `llm`（语义判定）、`regex`（正则匹配）、`jsonata`（表达式）；不写 judge 走 exit code（省 token）
+- **Zod 校验** — spec 和 trace 都有 Zod schema，写错 YAML 立即报具体错误
 - **异步重试** — 配置 `retry` 后，判定可返回 RETRY 等待后重试，支持固定/指数退避
 - **trace 回放** — `atest show trace.jsonl` 完整复现运行时输出，不重跑命令
 - **FAIL 即停** — 一步失败后续不执行，teardown 照跑，不会把系统搞坏

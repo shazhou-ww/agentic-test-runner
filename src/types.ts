@@ -27,11 +27,28 @@ export interface JSONataJudge {
 
 export interface RegexJudge {
 	type: 'regex';
-	/** Regex pattern matched against stdout. Match = PASS */
+	/** Regex pattern matched against stdout (trimmed). Match = PASS */
 	expr: string;
 }
 
 export type Judge = LLMJudge | JSONataJudge | RegexJudge;
+
+export interface TestStep {
+	/** Shell command to execute */
+	command: string;
+	/**
+	 * Judge configuration. If omitted, this is a "transition step" —
+	 * auto-judged by exit code (0 = PASS, non-zero = FAIL or RETRY if retry configured).
+	 */
+	judge?: Judge;
+	/** Timeout in seconds for the command itself (default: 30) */
+	timeout?: number;
+	/**
+	 * Retry configuration for async/long-running operations.
+	 * When enabled, the step can return RETRY and be re-executed after waiting.
+	 */
+	retry?: RetryConfig;
+}
 
 export interface TestSpec {
 	/** Test case name (shown in stdout + trace meta) */
@@ -51,29 +68,54 @@ export interface TestSpec {
 	steps: TestStep[];
 }
 
-export interface TestStep {
-	/** Shell command to execute */
-	command: string;
+// ─── Internal Types ───────────────────────────────────────────────
 
-	/**
-	 * Judge configuration. If omitted, this is a "transition step" —
-	 * auto-judged by exit code (0 = PASS, non-zero = FAIL or RETRY if retry configured).
-	 */
-	judge?: Judge;
+export type Verdict = 'PASS' | 'FAIL' | 'RETRY';
+export type JudgeType = 'llm' | 'jsonata' | 'regex' | 'exit_code' | 'unknown';
 
-	/** Timeout in seconds for the command itself (default: 30) */
-	timeout?: number;
+export interface ExecResult {
+	stdout: string;
+	stderr: string;
+	exitCode: number;
+	timedOut: boolean;
+	cwd: string | null;
+}
 
-	/**
-	 * Retry configuration for async/long-running operations.
-	 * When enabled, the step can return RETRY and be re-executed after waiting.
-	 */
-	retry?: RetryConfig;
+export interface JudgeResult {
+	verdict: Verdict;
+	reason: string;
+	raw: string | null;
+	type: JudgeType;
+	input: string | null;
+}
+
+export interface StepResult extends ExecResult {
+	judgeReason: string | null;
+	judgeVerdict: Verdict | null;
+	attempt?: number;
+}
+
+export interface RunOptions {
+	'api-key'?: string;
+	'base-url'?: string;
+	model?: string;
+	output?: string;
+	'no-trace'?: boolean;
+	help?: boolean;
+}
+
+export interface JudgeContext {
+	apiKey: string;
+	baseUrl: string;
+	model: string;
+	testCase: TestSpec;
+	stepResults: StepResult[];
+	stepIndex: number;
+	retryEnabled: boolean;
 }
 
 // ─── Trace JSONL (output) ─────────────────────────────────────────
 
-/** First line of every trace file */
 export interface TraceMeta {
 	type: 'meta';
 	name: string | null;
@@ -86,7 +128,6 @@ export interface TraceMeta {
 	timestamp: string; // ISO 8601
 }
 
-/** Setup or teardown command record */
 export interface TraceLifecycle {
 	type: 'setup' | 'teardown';
 	command: string;
@@ -96,7 +137,6 @@ export interface TraceLifecycle {
 	timestamp: string; // ISO 8601
 }
 
-/** One per test step attempt — the verbose record */
 export interface TraceStep {
 	type: 'step';
 	index: number;
@@ -110,10 +150,10 @@ export interface TraceStep {
 	/** Working directory at the time this step executed */
 	cwd: string | null;
 	/** Judge type: 'llm', 'jsonata', 'regex', or 'exit_code' (transition step) */
-	judge_type: 'llm' | 'jsonata' | 'regex' | 'exit_code';
+	judge_type: JudgeType;
 	/** The prompt (llm), expression (jsonata/regex), or null (exit_code) */
 	judge_input: string | null;
-	judge_verdict: 'PASS' | 'FAIL' | 'RETRY';
+	judge_verdict: Verdict;
 	judge_reason: string;
 	/** Full raw LLM response (null for non-LLM judges) */
 	judge_raw: string | null;
@@ -121,7 +161,6 @@ export interface TraceStep {
 	timestamp: string; // ISO 8601
 }
 
-/** Last line of every trace file */
 export interface TraceSummary {
 	type: 'summary';
 	total_steps: number;
@@ -137,8 +176,4 @@ export interface TraceSummary {
 }
 
 /** Union of all possible trace lines */
-export type TraceLine =
-	| TraceMeta
-	| TraceLifecycle
-	| TraceStep
-	| TraceSummary;
+export type TraceLine = TraceMeta | TraceLifecycle | TraceStep | TraceSummary;
