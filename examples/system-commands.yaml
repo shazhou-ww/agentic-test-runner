@@ -1,0 +1,36 @@
+# System commands test spec for atest
+name: "System commands"
+description: "Verify common system commands work correctly"
+
+cwd: /tmp
+
+setup:
+  - "rm -rf /tmp/atest-demo"
+  - "mkdir -p /tmp/atest-demo"
+
+steps:
+  - command: "echo 'hello atest'"
+    judge_prompt: "输出应包含 'hello atest'"
+    timeout: 5
+
+  - command: "cd /tmp/atest-demo && pwd"
+    judge_prompt: "输出应为 /tmp/atest-demo"
+
+  - command: "printf 'line1\nline2\nline3\n' > file.txt && cat file.txt"
+    judge_prompt: "输出应有 3 行，分别为 line1、line2、line3"
+
+  - command: "wc -l file.txt | awk '{print $1}'"
+    judge_prompt: "输出应为 3"
+
+  - command: "uname -s"
+    judge_prompt: "输出应为 Linux 或 Darwin"
+
+  - command: "sleep 2 && echo 'done'"
+    judge_prompt: "输出应包含 'done'，证明 sleep 命令正常完成"
+    timeout: 10
+
+  - command: "false"
+    judge_prompt: "exit code 应为 1（false 命令总是返回非零）"
+
+teardown:
+  - "rm -rf /tmp/atest-demo"

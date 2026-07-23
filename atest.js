@@ -12,18 +12,17 @@
  *   atest <test-case.yaml> [options]
  *
  * Options:
- *   --api-key <key>     LLM API key (or JUDGE_API_KEY env)
- *   --base-url <url>    LLM API endpoint (or JUDGE_BASE_URL env)
- *   --model <name>      LLM model name (or JUDGE_MODEL env, default: glm-5.2)
- *   --provider <name>   Provider preset: dashscope | copilot
- *   --output <path>     Write JSONL trace to file (default: <testcase-stem>.trace.jsonl)
+ *   --api-key <key>     LLM API key (or ATEST_API_KEY env)
+ *   --base-url <url>    LLM API endpoint (or ATEST_BASE_URL env)
+ *   --model <name>      LLM model name (or ATEST_MODEL env, default: glm-5.2)
+ *   -o, --output <path>  JSONL trace output path (default: <stem>-<timestamp>.jsonl)
  *   --no-trace          Disable trace output
- *   --verbose           Print full LLM responses
  *   --dry-run           Execute commands but skip LLM judgment
  *
- * Provider presets (use --provider <name>):
- *   dashscope  → https://dashscope.aliyuncs.com/compatible-mode/v1 + glm-5.2
- *   copilot    → http://127.0.0.1:4142/v1 + claude-opus-4.6
+ * Environment variables:
+ *   ATEST_API_KEY      LLM API key
+ *   ATEST_BASE_URL     LLM API endpoint
+ *   ATEST_MODEL        LLM model name (default: glm-5.2)
  */
 
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
@@ -31,19 +30,6 @@ import { join, dirname, basename } from 'node:path';
 import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { parse } from 'yaml';
-
-// ─── Provider Presets ──────────────────────────────────────────────
-
-const PROVIDERS = {
-	dashscope: {
-		baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-		model: 'glm-5.2',
-	},
-	copilot: {
-		baseUrl: 'http://127.0.0.1:4142/v1',
-		model: 'claude-opus-4.6',
-	},
-};
 
 // ─── Judge System Prompt ───────────────────────────────────────────
 
@@ -65,7 +51,8 @@ Be strict but fair. Only PASS when the output clearly meets the criteria. The ex
 
 class PersistentShell {
 	constructor(cwd) {
-		this.shell = spawn('bash', ['--noprofile', '--norc', '-i'], {
+		// Non-interactive shell: no prompt noise, cd/export still persist
+		this.shell = spawn('bash', ['--noprofile', '--norc', '-s'], {
 			cwd,
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
@@ -80,23 +67,16 @@ class PersistentShell {
 		});
 	}
 
-	/**
-	 * Execute a command in the persistent shell.
-	 * Returns { stdout, stderr, exitCode }
-	 */
 	async exec(command, timeout = 30000) {
 		this.buffer = '';
 		const startMarker = `${this.marker}START`;
 		const endMarker = `${this.marker}END`;
 		const exitMarker = `${this.marker}EXIT`;
 
-		// Write command with markers
 		this.shell.stdin.write(`echo "${startMarker}"; ${command}; echo "${exitMarker}$?"; echo "${endMarker}"\n`);
 
-		// Wait for end marker
 		const result = await this._waitForMarker(endMarker, timeout);
 
-		// Parse output between markers
 		const startIdx = result.indexOf(startMarker);
 		const endIdx = result.indexOf(exitMarker);
 		if (startIdx === -1 || endIdx === -1) {
@@ -104,10 +84,8 @@ class PersistentShell {
 		}
 
 		let output = result.slice(startIdx + startMarker.length + 1, endIdx);
-		// Strip leading newline from echo
 		if (output.startsWith('\n')) output = output.slice(1);
 
-		// Extract exit code
 		const exitLine = result.slice(endIdx + exitMarker.length, result.indexOf(endMarker, endIdx + 1));
 		const exitCode = Number.parseInt(exitLine.trim(), 10);
 
@@ -115,7 +93,7 @@ class PersistentShell {
 	}
 
 	_waitForMarker(marker, timeout) {
-		return new Promise((resolve, reject) => {
+		return new Promise((resolve) => {
 			const startTime = Date.now();
 			const check = () => {
 				if (this.buffer.includes(marker)) {
@@ -179,21 +157,6 @@ function parseJudgeResponse(response) {
 
 // ─── Context Assembly ─────────────────────────────────────────────
 
-/**
- * Assemble messages for LLM judgment.
- *
- * Structure:
- * - system: judge system prompt
- * - user: case overview
- * - assistant: fake terminal tool_call (step 1)
- * - tool: result 1 (with exit code)
- * - user: judge prompt for step 1
- * - assistant: (judge's PASS response, if passed)
- * - assistant: fake terminal tool_call (step 2)
- * - tool: result 2
- * - user: judge prompt for step 2
- * ...
- */
 function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 	const messages = [
 		{ role: 'system', content: JUDGE_SYSTEM_PROMPT },
@@ -207,7 +170,6 @@ function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 		const step = testCase.steps[i];
 		const result = stepResults[i];
 
-		// Fake tool call — makes the LLM think it executed this command
 		messages.push({
 			role: 'assistant',
 			content: null,
@@ -223,7 +185,6 @@ function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 			],
 		});
 
-		// Tool result — actual execution output
 		const toolContent = `[exit: ${result.exitCode}]\n${result.stdout}`;
 		messages.push({
 			role: 'tool',
@@ -232,7 +193,6 @@ function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 		});
 
 		if (i < currentStepIndex) {
-			// Previous step already judged — add the judge response
 			messages.push({
 				role: 'user',
 				content: `Step ${i + 1} 预期: ${step.judge_prompt}`,
@@ -242,7 +202,6 @@ function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 				content: `VERDICT: PASS\nREASON: ${result.judgeReason ?? 'Passed'}`,
 			});
 		} else {
-			// Current step — this is what we want the LLM to judge
 			messages.push({
 				role: 'user',
 				content: `Step ${i + 1} 预期: ${step.judge_prompt}\n\n判定 PASS 或 FAIL，给出原因。`,
@@ -265,13 +224,15 @@ function truncateOutput(output, maxLines = 100) {
 
 // ─── JSONL Trace ───────────────────────────────────────────────────
 
-/**
- * Build the default trace output path from the test case path.
- * example.yaml → example.trace.jsonl
- */
+function timestamp() {
+	const d = new Date();
+	const p = (n) => String(n).padStart(2, '0');
+	return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
 function defaultTracePath(testCasePath) {
 	const stem = basename(testCasePath).replace(/\.ya?ml$/, '');
-	return join(dirname(testCasePath), `${stem}.trace.jsonl`);
+	return join(process.cwd(), `${stem}-${timestamp()}.jsonl`);
 }
 
 // ─── Main ───────────────────────────────────────────────────────────
@@ -282,25 +243,28 @@ async function main() {
 			'api-key': { type: 'string' },
 			'base-url': { type: 'string' },
 			model: { type: 'string' },
-			provider: { type: 'string' },
-			output: { type: 'string' },
+			output: { type: 'string', short: 'o' },
 			'no-trace': { type: 'boolean', default: false },
 			'dry-run': { type: 'boolean', default: false },
-			verbose: { type: 'boolean', default: false },
 		},
 		allowPositionals: true,
 	});
 
 	if (positionals.length === 0) {
 		console.error('Usage: atest <test-case.yaml> [options]');
-		console.error('  --provider dashscope|copilot  Provider preset');
-		console.error('  --api-key <key>               LLM API key (or JUDGE_API_KEY env)');
-		console.error('  --base-url <url>              LLM endpoint (or JUDGE_BASE_URL env)');
-		console.error('  --model <name>                Model name (or JUDGE_MODEL env)');
-		console.error('  --output <path>               JSONL trace output path');
-		console.error('  --no-trace                    Disable trace output');
-		console.error('  --dry-run                     Execute commands, skip LLM judgment');
-		console.error('  --verbose                     Print full LLM responses');
+		console.error('');
+		console.error('Options:');
+		console.error('  --api-key <key>       LLM API key (or ATEST_API_KEY env)');
+		console.error('  --base-url <url>      LLM endpoint (or ATEST_BASE_URL env)');
+		console.error('  --model <name>        Model name (or ATEST_MODEL env, default: glm-5.2)');
+		console.error('  -o, --output <path>   JSONL trace path (default: <stem>-<timestamp>.jsonl)');
+		console.error('  --no-trace            Disable trace output');
+		console.error('  --dry-run             Execute commands, skip LLM judgment');
+		console.error('');
+		console.error('Environment:');
+		console.error('  ATEST_API_KEY         LLM API key');
+		console.error('  ATEST_BASE_URL        LLM API endpoint');
+		console.error('  ATEST_MODEL           LLM model name (default: glm-5.2)');
 		process.exit(1);
 	}
 
@@ -320,14 +284,13 @@ async function main() {
 		process.exit(1);
 	}
 
-	// Resolve provider config
-	const preset = values.provider ? PROVIDERS[values.provider] : null;
-	const apiKey = values['api-key'] ?? process.env.JUDGE_API_KEY ?? '';
-	const baseUrl = values['base-url'] ?? process.env.JUDGE_BASE_URL ?? preset?.baseUrl ?? '';
-	const model = values.model ?? process.env.JUDGE_MODEL ?? preset?.model ?? 'glm-5.2';
+	// Resolve LLM config: CLI > env > default
+	const apiKey = values['api-key'] ?? process.env.ATEST_API_KEY ?? '';
+	const baseUrl = values['base-url'] ?? process.env.ATEST_BASE_URL ?? '';
+	const model = values.model ?? process.env.ATEST_MODEL ?? 'glm-5.2';
 
 	if (!values['dry-run'] && !apiKey) {
-		console.error('No API key. Set JUDGE_API_KEY or use --api-key or --provider');
+		console.error('No API key. Set ATEST_API_KEY or use --api-key');
 		process.exit(1);
 	}
 
@@ -338,6 +301,7 @@ async function main() {
 
 	const startedAt = new Date().toISOString();
 
+	// stdout: brief banner
 	console.log(`\n🧪 atest — LLM-judged CLI test runner`);
 	console.log(`   Case: ${testCase.name ?? testCasePath}`);
 	console.log(`   Steps: ${testCase.steps.length}`);
@@ -348,7 +312,7 @@ async function main() {
 	}
 	console.log('');
 
-	// Trace: meta line
+	// Trace: meta (verbose)
 	if (enableTrace) {
 		traceLines.push(JSON.stringify({
 			type: 'meta',
@@ -374,6 +338,7 @@ async function main() {
 				traceLines.push(JSON.stringify({
 					type: 'setup',
 					command: cmd,
+					stdout: setupResult.stdout,
 					exit_code: setupResult.exitCode,
 				}));
 			}
@@ -382,7 +347,7 @@ async function main() {
 
 	const stepResults = [];
 	let allPassed = true;
-	const stepStartTime = Date.now();
+	const overallStart = Date.now();
 
 	try {
 		for (let i = 0; i < testCase.steps.length; i++) {
@@ -390,6 +355,7 @@ async function main() {
 			const timeout = (step.timeout ?? 30) * 1000;
 			const stepStart = Date.now();
 
+			// stdout: brief — command + exit
 			console.log(`\n━━━ Step ${i + 1}/${testCase.steps.length} ━━━`);
 			console.log(`  $ ${step.command}`);
 
@@ -405,15 +371,18 @@ async function main() {
 				stepResults.push({ ...result, judgeReason: 'dry-run', judgeVerdict: 'SKIP' });
 
 				if (enableTrace) {
+					// Trace: verbose — full output + judge raw
 					traceLines.push(JSON.stringify({
 						type: 'step',
 						index: i,
 						command: step.command,
 						stdout: result.stdout,
 						exit_code: result.exitCode,
+						timed_out: result.timedOut ?? false,
 						judge_prompt: step.judge_prompt ?? null,
 						judge_verdict: 'SKIP',
 						judge_reason: 'dry-run',
+						judge_raw: null,
 						duration_ms: stepDuration,
 					}));
 				}
@@ -427,17 +396,13 @@ async function main() {
 			const messages = assembleJudgeMessages(testCase, stepResults, i);
 
 			// Call LLM judge
-			const response = await callJudge({ messages, apiKey, baseUrl, model });
-			const { pass, reason } = parseJudgeResponse(response);
-
-			if (values.verbose) {
-				console.log(`  [judge response] ${response}`);
-			}
+			const judgeResponse = await callJudge({ messages, apiKey, baseUrl, model });
+			const { pass, reason } = parseJudgeResponse(judgeResponse);
 
 			stepResults[i].judgeReason = reason;
 			stepResults[i].judgeVerdict = pass ? 'PASS' : 'FAIL';
 
-			// Trace: step line
+			// Trace: verbose — full stdout + judge raw response
 			if (enableTrace) {
 				traceLines.push(JSON.stringify({
 					type: 'step',
@@ -445,14 +410,16 @@ async function main() {
 					command: step.command,
 					stdout: result.stdout,
 					exit_code: result.exitCode,
+					timed_out: result.timedOut ?? false,
 					judge_prompt: step.judge_prompt ?? null,
 					judge_verdict: pass ? 'PASS' : 'FAIL',
 					judge_reason: reason,
-					judge_raw: values.verbose ? response : null,
+					judge_raw: judgeResponse,
 					duration_ms: stepDuration,
 				}));
 			}
 
+			// stdout: brief — verdict + reason
 			if (pass) {
 				console.log(`  ✅ PASS: ${reason}`);
 			} else {
@@ -471,6 +438,7 @@ async function main() {
 					traceLines.push(JSON.stringify({
 						type: 'teardown',
 						command: cmd,
+						stdout: teardownResult.stdout,
 						exit_code: teardownResult.exitCode,
 					}));
 				}
@@ -479,10 +447,10 @@ async function main() {
 		shell.close();
 	}
 
-	const totalDuration = Date.now() - stepStartTime;
+	const totalDuration = Date.now() - overallStart;
 	const endedAt = new Date().toISOString();
 
-	// Summary
+	// stdout: brief summary
 	console.log('\n━━━ Summary ━━━');
 	const totalCount = stepResults.length;
 	const passedCount = stepResults.filter((r) => r.judgeVerdict === 'PASS').length;
@@ -495,7 +463,7 @@ async function main() {
 		console.log(`❌ ${passedCount}/${totalCount} steps passed`);
 	}
 
-	// Trace: summary line
+	// Trace: summary (verbose)
 	if (enableTrace) {
 		traceLines.push(JSON.stringify({
 			type: 'summary',
@@ -511,7 +479,7 @@ async function main() {
 
 		// Write trace file
 		writeFileSync(tracePath, traceLines.join('\n') + '\n');
-		console.log(`📊 Trace written to: ${tracePath}`);
+		console.log(`📊 Trace: ${tracePath}`);
 	}
 
 	process.exit(allPassed ? 0 : 1);
