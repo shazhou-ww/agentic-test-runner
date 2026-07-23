@@ -11,6 +11,13 @@ export interface TestSpec {
 	/** What this test case tests (shown to LLM judge as context) */
 	description?: string;
 
+	/**
+	 * Working directory for the persistent shell.
+	 * Relative to the spec file's location. Machine-independent.
+	 * Example: "./test-workspace" or "../shared/fixtures"
+	 */
+	cwd?: string;
+
 	/** Commands to run before steps (not judged) */
 	setup?: string[];
 
@@ -67,6 +74,8 @@ export interface TraceStep {
 	stdout: string;
 	exit_code: number;
 	timed_out: boolean;
+	/** Working directory at the time this step executed (after any cd in prior steps) */
+	cwd: string | null;
 	judge_prompt: string | null;
 	judge_verdict: 'PASS' | 'FAIL' | 'SKIP';
 	judge_reason: string;

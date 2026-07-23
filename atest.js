@@ -28,7 +28,8 @@
  */
 
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, dirname, resolve } from 'node:path';
+
 import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { parse } from 'yaml';
@@ -73,24 +74,38 @@ class PersistentShell {
 		const startMarker = `${this.marker}START`;
 		const endMarker = `${this.marker}END`;
 		const exitMarker = `${this.marker}EXIT`;
+		const cwdMarker = `${this.marker}CWD`;
 
-		this.shell.stdin.write(`echo "${startMarker}"; ${command}; echo "${exitMarker}$?"; echo "${endMarker}"\n`);
+		this.shell.stdin.write(`echo "${startMarker}"; ${command}; echo "${exitMarker}$?"; echo "${cwdMarker}$(pwd)"; echo "${endMarker}"\n`);
 
 		const result = await this._waitForMarker(endMarker, timeout);
 
 		const startIdx = result.indexOf(startMarker);
-		const endIdx = result.indexOf(exitMarker);
-		if (startIdx === -1 || endIdx === -1) {
-			return { stdout: result, exitCode: -1, timedOut: true };
+		const exitIdx = result.indexOf(exitMarker);
+		if (startIdx === -1 || exitIdx === -1) {
+			return { stdout: result, exitCode: -1, timedOut: true, cwd: null };
 		}
 
-		let output = result.slice(startIdx + startMarker.length + 1, endIdx);
+		let output = result.slice(startIdx + startMarker.length + 1, exitIdx);
 		if (output.startsWith('\n')) output = output.slice(1);
 
-		const exitLine = result.slice(endIdx + exitMarker.length, result.indexOf(endMarker, endIdx + 1));
+		// Extract exit code
+		const exitLine = result.slice(exitIdx + exitMarker.length, result.indexOf(cwdMarker, exitIdx));
 		const exitCode = Number.parseInt(exitLine.trim(), 10);
 
-		return { stdout: output, exitCode: Number.isNaN(exitCode) ? -1 : exitCode, timedOut: false };
+		// Extract cwd
+		const cwdStart = result.indexOf(cwdMarker);
+		const cwdEnd = result.indexOf(endMarker, cwdStart);
+		const cwd = cwdStart !== -1 && cwdEnd !== -1
+			? result.slice(cwdStart + cwdMarker.length, cwdEnd).trim()
+			: null;
+
+		return {
+			stdout: output,
+			exitCode: Number.isNaN(exitCode) ? -1 : exitCode,
+			timedOut: false,
+			cwd,
+		};
 	}
 
 	_waitForMarker(marker, timeout) {
@@ -303,12 +318,18 @@ async function main() {
 	const traceLines = [];
 
 	const startedAt = new Date().toISOString();
+	// Resolve cwd: relative to spec file location, fallback to process.cwd()
+	const specDir = dirname(testCasePath);
+	const shellCwd = testCase.cwd ? resolve(specDir, testCase.cwd) : process.cwd();
 
 	// stdout: brief banner
 	console.log(`\n🧪 atest — LLM-judged CLI test runner`);
 	console.log(`   Case: ${testCase.name ?? testCasePath}`);
 	console.log(`   Steps: ${testCase.steps.length}`);
 	console.log(`   Judge: ${model} @ ${baseUrl || '(dry-run)'}`);
+	if (testCase.cwd) {
+		console.log(`   CWD: ${shellCwd} (from spec: ${testCase.cwd})`);
+	}
 	if (tracePath) {
 		console.log(`   Trace: ${tracePath}`);
 	}
@@ -320,6 +341,7 @@ async function main() {
 			type: 'meta',
 			name: testCase.name ?? null,
 			description: testCase.description ?? null,
+			cwd: shellCwd,
 			model,
 			base_url: baseUrl || null,
 			total_steps: testCase.steps.length,
@@ -328,8 +350,8 @@ async function main() {
 		}));
 	}
 
-	// Setup persistent shell — always cwd of where atest is run
-	const shell = new PersistentShell(process.cwd());
+	// Create persistent shell with resolved cwd
+	const shell = new PersistentShell(shellCwd);
 
 	// Run setup commands
 	if (testCase.setup) {
@@ -375,16 +397,17 @@ async function main() {
 				stepResults.push({ ...result, judgeReason: 'dry-run', judgeVerdict: 'SKIP' });
 
 				if (enableTrace) {
-					traceLines.push(JSON.stringify({
-						type: 'step',
-						index: i,
-						command: step.command,
-						stdout: result.stdout,
-						exit_code: result.exitCode,
-						timed_out: result.timedOut ?? false,
-						judge_prompt: step.judge_prompt ?? null,
-						judge_verdict: 'SKIP',
-						judge_reason: 'dry-run',
+				traceLines.push(JSON.stringify({
+					type: 'step',
+					index: i,
+					command: step.command,
+					stdout: result.stdout,
+					exit_code: result.exitCode,
+					timed_out: result.timedOut ?? false,
+					cwd: result.cwd,
+					judge_prompt: step.judge_prompt ?? null,
+					judge_verdict: 'SKIP',
+					judge_reason: 'dry-run',
 						judge_raw: null,
 						judge_method: null,
 						duration_ms: stepDuration,
@@ -414,9 +437,10 @@ async function main() {
 						command: step.command,
 						stdout: result.stdout,
 						exit_code: result.exitCode,
-						timed_out: result.timedOut ?? false,
-						judge_prompt: step.judge_prompt,
-						judge_verdict: pass ? 'PASS' : 'FAIL',
+				timed_out: result.timedOut ?? false,
+					cwd: result.cwd,
+					judge_prompt: step.judge_prompt,
+					judge_verdict: pass ? 'PASS' : 'FAIL',
 						judge_reason: reason,
 						judge_raw: judgeResponse,
 						judge_method: 'llm',
@@ -449,9 +473,10 @@ async function main() {
 						command: step.command,
 						stdout: result.stdout,
 						exit_code: result.exitCode,
-						timed_out: result.timedOut ?? false,
-						judge_prompt: null,
-						judge_verdict: pass ? 'PASS' : 'FAIL',
+				timed_out: result.timedOut ?? false,
+					cwd: result.cwd,
+					judge_prompt: null,
+					judge_verdict: pass ? 'PASS' : 'FAIL',
 						judge_reason: reason,
 						judge_raw: null,
 						judge_method: 'exit_code',

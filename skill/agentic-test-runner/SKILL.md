@@ -138,9 +138,25 @@ steps:
     judge_prompt: "输出应包含 'data'"
 ```
 
-### No hardcoded paths
+### No hardcoded absolute paths
 
-Specs should be machine-independent. Do not set `cwd` in the spec. If you need a specific directory, `cd` to it in a setup or transition step.
+Specs should be machine-independent. Use `cwd` (relative to spec file location) or `cd` in transition steps. Do not use absolute paths like `/home/user/project`.
+
+```yaml
+# Using cwd field — relative to spec file
+cwd: ./test-workspace
+setup:
+  - "mkdir -p fixtures"
+steps:
+  - command: "ls fixtures"
+    judge_prompt: "应列出至少 1 个文件"
+
+# Or cd in a transition step
+steps:
+  - command: "cd ./test-workspace"   # transition step
+  - command: "pwd"
+    judge_prompt: "输出应包含 test-workspace"
+```
 
 ## How to run atest
 
@@ -233,6 +249,7 @@ summary    ← final result (pass/fail counts, duration)
 | `stdout` | Full command output (not truncated in trace) |
 | `exit_code` | Process exit code |
 | `timed_out` | Whether the step timed out |
+| `cwd` | Working directory when step executed (after any cd in prior steps) |
 | `judge_prompt` | Criteria given to LLM (null for transition steps) |
 | `judge_verdict` | `PASS`, `FAIL`, or `SKIP` (dry-run) |
 | `judge_reason` | One-line explanation |
