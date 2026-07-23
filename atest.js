@@ -17,7 +17,7 @@
  * Environment:
  *   ATEST_API_KEY       LLM API key
  *   ATEST_BASE_URL      LLM API endpoint
- *   ATEST_MODEL         LLM model name (required for LLM judgment)
+ *   ATEST_MODEL         LLM model name (required for judge type: llm)
  */
 
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { parse } from 'yaml';
+import jsonata from 'jsonata';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf-8'));
@@ -38,7 +39,7 @@ function sleep(ms) {
 
 // ─── Judge System Prompt ───────────────────────────────────────────
 
-const JUDGE_SYSTEM_PROMPT = `You are a CLI test judge. You are given a sequence of terminal commands and their outputs from a test case. For each step, you receive the command, its output (with exit code), and the expected criteria (judge prompt).
+const JUDGE_SYSTEM_PROMPT = `You are a CLI test judge. You are given a sequence of terminal commands and their outputs from a test case. For each step, you receive the command, its output (stdout, stderr, with exit code), and the expected criteria (judge prompt).
 
 Your job: determine if the output meets the expected criteria.
 
@@ -64,15 +65,17 @@ class PersistentShell {
 			cwd,
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
-		this.buffer = '';
+		this.stdoutBuf = '';
+		this.stderrBuf = '';
 		this.marker = `__ATEST_MARKER_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
 
-		this.shell.stdout.on('data', (data) => { this.buffer += data.toString(); });
-		this.shell.stderr.on('data', (data) => { this.buffer += data.toString(); });
+		this.shell.stdout.on('data', (data) => { this.stdoutBuf += data.toString(); });
+		this.shell.stderr.on('data', (data) => { this.stderrBuf += data.toString(); });
 	}
 
 	async exec(command, timeout = 30000) {
-		this.buffer = '';
+		this.stdoutBuf = '';
+		this.stderrBuf = '';
 		const startMarker = `${this.marker}START`;
 		const endMarker = `${this.marker}END`;
 		const exitMarker = `${this.marker}EXIT`;
@@ -85,7 +88,7 @@ class PersistentShell {
 		const startIdx = result.indexOf(startMarker);
 		const exitIdx = result.indexOf(exitMarker);
 		if (startIdx === -1 || exitIdx === -1) {
-			return { stdout: result, exitCode: -1, timedOut: true, cwd: null };
+			return { stdout: result, stderr: this.stderrBuf, exitCode: -1, timedOut: true, cwd: null };
 		}
 
 		let output = result.slice(startIdx + startMarker.length + 1, exitIdx);
@@ -102,6 +105,7 @@ class PersistentShell {
 
 		return {
 			stdout: output,
+			stderr: this.stderrBuf,
 			exitCode: Number.isNaN(exitCode) ? -1 : exitCode,
 			timedOut: false,
 			cwd,
@@ -112,9 +116,9 @@ class PersistentShell {
 		return new Promise((resolve) => {
 			const startTime = Date.now();
 			const check = () => {
-				if (this.buffer.includes(marker)) return resolve(this.buffer);
+				if (this.stdoutBuf.includes(marker)) return resolve(this.stdoutBuf);
 				if (Date.now() - startTime > timeout)
-					return resolve(this.buffer + `\n[TIMEOUT after ${timeout}ms]`);
+					return resolve(this.stdoutBuf + `\n[TIMEOUT after ${timeout}ms]`);
 				setTimeout(check, 50);
 			};
 			check();
@@ -157,10 +161,26 @@ function parseJudgeResponse(response) {
 	return { verdict, reason };
 }
 
+// ─── JSONata Judge ─────────────────────────────────────────────────
+
+async function evaluateJsonata(expr, input) {
+	const expression = jsonata(expr);
+	const result = await expression.evaluate(input);
+	return result;
+}
+
+// ─── Regex Judge ────────────────────────────────────────────────────
+
+function evaluateRegex(pattern, input) {
+	const re = new RegExp(pattern);
+	return re.test(input.stdout.trim());
+}
+
 // ─── Context Assembly ─────────────────────────────────────────────
 
 function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 	const step = testCase.steps[currentStepIndex];
+	const judge = step.judge;
 	const retryEnabled = !!step.retry;
 
 	const messages = [
@@ -185,19 +205,23 @@ function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 			}],
 		});
 
+		const toolContent = result.stderr
+			? `[exit: ${result.exitCode}]\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+			: `[exit: ${result.exitCode}]\n${result.stdout}`;
+
 		messages.push({
 			role: 'tool',
 			tool_call_id: `call_${i + 1}`,
-			content: `[exit: ${result.exitCode}]\n${result.stdout}`,
+			content: toolContent,
 		});
 
 		if (i < currentStepIndex) {
-			messages.push({ role: 'user', content: `Step ${i + 1} 预期: ${s.judge_prompt}` });
+			messages.push({ role: 'user', content: `Step ${i + 1} 预期: ${s.judge?.prompt ?? '(transition)'}` });
 			messages.push({ role: 'assistant', content: `VERDICT: PASS\nREASON: ${result.judgeReason ?? 'Passed'}` });
 		} else {
 			const instruction = retryEnabled
-				? `Step ${i + 1} 预期: ${s.judge_prompt}\n\n判定 PASS、FAIL 或 RETRY（如操作正在进行中，等待后可能成功），给出原因。`
-				: `Step ${i + 1} 预期: ${s.judge_prompt}\n\n判定 PASS 或 FAIL，给出原因。`;
+				? `Step ${i + 1} 预期: ${judge.prompt}\n\n判定 PASS、FAIL 或 RETRY（如操作正在进行中，等待后可能成功），给出原因。`
+				: `Step ${i + 1} 预期: ${judge.prompt}\n\n判定 PASS 或 FAIL，给出原因。`;
 			messages.push({ role: 'user', content: instruction });
 		}
 	}
@@ -236,6 +260,9 @@ function printStep(line, totalSteps) {
 	console.log(`\n━━━ Step ${line.index + 1}/${totalSteps}${attemptStr} ━━━`);
 	console.log(`  $ ${line.command}`);
 	console.log(`  ${truncateOutput(line.stdout)}`);
+	if (line.stderr) {
+		console.log(`  ${truncateOutput(line.stderr)}`);
+	}
 	console.log(`  [exit: ${line.exit_code}]`);
 
 	if (line.judge_verdict === 'RETRY') {
@@ -296,6 +323,77 @@ function waitTime(rc, attempt) {
 	return rc.backoff ? rc.interval * Math.pow(2, attempt) : rc.interval;
 }
 
+// ─── Judge dispatcher ──────────────────────────────────────────────
+
+/**
+ * Run the appropriate judge for a step.
+ * Returns { verdict, reason, raw }
+ * verdict: 'PASS' | 'FAIL' | 'RETRY'
+ */
+async function runJudge(step, execResult, { apiKey, baseUrl, model, testCase, stepResults, stepIndex, retryEnabled }) {
+	const judge = step.judge;
+
+	if (!judge) {
+		// Transition step — exit code judge
+		const pass = execResult.exitCode === 0;
+		return {
+			verdict: pass ? 'PASS' : 'FAIL',
+			reason: pass ? 'exit code 0 (transition step)' : `exit code ${execResult.exitCode} (transition step, expected 0)`,
+			raw: null,
+			type: 'exit_code',
+			input: null,
+		};
+	}
+
+	if (judge.type === 'llm') {
+		// LLM judge
+		const messages = assembleJudgeMessages(testCase, stepResults, stepIndex);
+		const judgeResponse = await callJudge({ messages, apiKey, baseUrl, model });
+		const { verdict, reason } = parseJudgeResponse(judgeResponse);
+		return { verdict, reason, raw: judgeResponse, type: 'llm', input: judge.prompt };
+	}
+
+	if (judge.type === 'jsonata') {
+		// JSONata judge — deterministic
+		const input = { stdout: execResult.stdout, stderr: execResult.stderr, exit_code: execResult.exitCode };
+		let result;
+		try {
+			result = await evaluateJsonata(judge.expr, input);
+		} catch (err) {
+			return { verdict: 'FAIL', reason: `jsonata error: ${err.message}`, raw: null, type: 'jsonata', input: judge.expr };
+		}
+		const pass = !!result;
+		return {
+			verdict: pass ? 'PASS' : 'FAIL',
+			reason: pass ? 'jsonata expression matched' : `jsonata expression returned ${JSON.stringify(result)}`,
+			raw: null,
+			type: 'jsonata',
+			input: judge.expr,
+		};
+	}
+
+	if (judge.type === 'regex') {
+		// Regex judge — match against stdout
+		const input = { stdout: execResult.stdout, stderr: execResult.stderr, exit_code: execResult.exitCode };
+		let pass;
+		try {
+			pass = evaluateRegex(judge.expr, input);
+		} catch (err) {
+			return { verdict: 'FAIL', reason: `regex error: ${err.message}`, raw: null, type: 'regex', input: judge.expr };
+		}
+		return {
+			verdict: pass ? 'PASS' : 'FAIL',
+			reason: pass ? 'regex matched' : 'regex did not match',
+			raw: null,
+			type: 'regex',
+			input: judge.expr,
+		};
+	}
+
+	// Unknown judge type
+	return { verdict: 'FAIL', reason: `unknown judge type: ${judge.type}`, raw: null, type: 'unknown', input: JSON.stringify(judge) };
+}
+
 // ─── cmdRun ───────────────────────────────────────────────────────
 
 async function cmdRun(specPath, opts) {
@@ -316,7 +414,7 @@ async function cmdRun(specPath, opts) {
 	const baseUrl = opts['base-url'] ?? process.env.ATEST_BASE_URL ?? '';
 	const model = opts.model ?? process.env.ATEST_MODEL ?? '';
 
-	const needsLLM = testCase.steps.some((s) => s.judge_prompt);
+	const needsLLM = testCase.steps.some((s) => s.judge?.type === 'llm');
 	if (needsLLM && !apiKey) {
 		console.error('No API key. Set ATEST_API_KEY or use --api-key');
 		process.exit(1);
@@ -360,7 +458,7 @@ async function cmdRun(specPath, opts) {
 	if (testCase.setup) {
 		for (const cmd of testCase.setup) {
 			const result = await shell.exec(cmd, 10000);
-			const line = { type: 'setup', command: cmd, stdout: result.stdout, exit_code: result.exitCode, timestamp: new Date().toISOString() };
+			const line = { type: 'setup', command: cmd, stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode, timestamp: new Date().toISOString() };
 			printSetup(line);
 			if (enableTrace) traceLines.push(JSON.stringify(line));
 		}
@@ -369,12 +467,14 @@ async function cmdRun(specPath, opts) {
 	const stepResults = [];
 	let allPassed = true;
 	const overallStart = Date.now();
+	const judgeOpts = { apiKey, baseUrl, model, testCase, stepResults };
 
 	try {
 		for (let i = 0; i < testCase.steps.length; i++) {
 			const step = testCase.steps[i];
 			const timeout = (step.timeout ?? 30) * 1000;
 			const rc = getRetryConfig(step);
+			const retryEnabled = !!rc;
 
 			let attempt = 0;
 			let stepDone = false;
@@ -385,105 +485,69 @@ async function cmdRun(specPath, opts) {
 				const stepDuration = Date.now() - stepStart;
 				const stepTimestamp = new Date().toISOString();
 
-				// Store result for this attempt (overwrites on retry)
 				stepResults[i] = { ...result, judgeReason: null };
 
-				if (step.judge_prompt) {
-					// LLM judgment
-					const messages = assembleJudgeMessages(testCase, stepResults, i);
-					const judgeResponse = await callJudge({ messages, apiKey, baseUrl, model });
-					const { verdict, reason } = parseJudgeResponse(judgeResponse);
+				const judgeResult = await runJudge(step, result, {
+					...judgeOpts,
+					stepIndex: i,
+					stepResults,
+					retryEnabled,
+				});
 
-					stepResults[i].judgeReason = reason;
-					stepResults[i].judgeVerdict = verdict;
+				stepResults[i].judgeReason = judgeResult.reason;
+				stepResults[i].judgeVerdict = judgeResult.verdict;
 
-					if (verdict === 'RETRY' && rc && attempt < rc.max) {
-						// RETRY — wait and try again
-						const line = {
-							type: 'step', index: i, attempt, command: step.command, stdout: result.stdout,
-							exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
-							judge_prompt: step.judge_prompt, judge_verdict: 'RETRY',
-							judge_reason: reason, judge_raw: judgeResponse, judge_method: 'llm',
-							duration_ms: stepDuration, timestamp: stepTimestamp,
-						};
-						printStep(line, testCase.steps.length);
-						if (enableTrace) traceLines.push(JSON.stringify(line));
-
-						const wait = waitTime(rc, attempt);
-						await sleep(wait * 1000);
-						attempt++;
-						continue;
-					}
-
-					// Final verdict (PASS, FAIL, or RETRY exhausted → FAIL)
-					const finalVerdict = verdict === 'RETRY' ? 'FAIL' : verdict;
-					const finalReason = verdict === 'RETRY'
-						? `max retries (${rc.max}) exceeded: ${reason}`
-						: reason;
-
-					stepResults[i].judgeVerdict = finalVerdict;
-					stepResults[i].judgeReason = finalReason;
-					stepResults[i].attempt = attempt;
-
-					const line = {
-						type: 'step', index: i, attempt, command: step.command, stdout: result.stdout,
-						exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
-						judge_prompt: step.judge_prompt, judge_verdict: finalVerdict,
-						judge_reason: finalReason, judge_raw: judgeResponse, judge_method: 'llm',
-						duration_ms: stepDuration, timestamp: stepTimestamp,
-					};
-					printStep(line, testCase.steps.length);
-					if (enableTrace) traceLines.push(JSON.stringify(line));
-
-					if (finalVerdict !== 'PASS') { allPassed = false; }
-					stepDone = true;
-
-				} else {
-					// Transition step — auto-judge by exit code
-					const pass = result.exitCode === 0;
-
-					if (!pass && rc && attempt < rc.max) {
-						// RETRY for transition step
-						const line = {
-							type: 'step', index: i, attempt, command: step.command, stdout: result.stdout,
-							exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
-							judge_prompt: null, judge_verdict: 'RETRY',
-							judge_reason: `exit code ${result.exitCode}, retrying`, judge_raw: null, judge_method: 'exit_code',
-							duration_ms: stepDuration, timestamp: stepTimestamp,
-						};
-						printStep(line, testCase.steps.length);
-						if (enableTrace) traceLines.push(JSON.stringify(line));
-
-						const wait = waitTime(rc, attempt);
-						await sleep(wait * 1000);
-						attempt++;
-						continue;
-					}
-
-					const finalVerdict = pass ? 'PASS' : 'FAIL';
-					const reason = pass
-						? 'exit code 0 (transition step)'
-						: rc
-							? `exit code ${result.exitCode} (transition step, max retries (${rc.max}) exceeded)`
-							: `exit code ${result.exitCode} (transition step, expected 0)`;
-
-					stepResults[i].judgeReason = reason;
-					stepResults[i].judgeVerdict = finalVerdict;
-					stepResults[i].attempt = attempt;
-
-					const line = {
-						type: 'step', index: i, attempt, command: step.command, stdout: result.stdout,
-						exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
-						judge_prompt: null, judge_verdict: finalVerdict,
-						judge_reason: reason, judge_raw: null, judge_method: 'exit_code',
-						duration_ms: stepDuration, timestamp: stepTimestamp,
-					};
-					printStep(line, testCase.steps.length);
-					if (enableTrace) traceLines.push(JSON.stringify(line));
-
-					if (!pass) { allPassed = false; }
-					stepDone = true;
+				// For deterministic judges, convert FAIL → RETRY when retry is available.
+				// LLM judges decide RETRY vs FAIL themselves — FAIL is final.
+				let verdict = judgeResult.verdict;
+				if (verdict === 'FAIL' && rc && attempt < rc.max && judgeResult.type !== 'llm') {
+					verdict = 'RETRY';
 				}
+
+				// Handle RETRY
+				if (verdict === 'RETRY' && rc && attempt < rc.max) {
+					const line = {
+						type: 'step', index: i, attempt, command: step.command,
+						stdout: result.stdout, stderr: result.stderr,
+						exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
+						judge_type: judgeResult.type, judge_input: judgeResult.input,
+						judge_verdict: 'RETRY', judge_reason: judgeResult.reason,
+						judge_raw: judgeResult.raw,
+						duration_ms: stepDuration, timestamp: stepTimestamp,
+					};
+					printStep(line, testCase.steps.length);
+					if (enableTrace) traceLines.push(JSON.stringify(line));
+
+					const wait = waitTime(rc, attempt);
+					await sleep(wait * 1000);
+					attempt++;
+					continue;
+				}
+
+				// Final verdict
+				const finalVerdict = verdict === 'RETRY' ? 'FAIL' : verdict;
+				const finalReason = verdict === 'RETRY'
+					? `max retries (${rc.max}) exceeded: ${judgeResult.reason}`
+					: judgeResult.reason;
+
+				stepResults[i].judgeVerdict = finalVerdict;
+				stepResults[i].judgeReason = finalReason;
+				stepResults[i].attempt = attempt;
+
+				const line = {
+					type: 'step', index: i, attempt, command: step.command,
+					stdout: result.stdout, stderr: result.stderr,
+					exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
+					judge_type: judgeResult.type, judge_input: judgeResult.input,
+					judge_verdict: finalVerdict, judge_reason: finalReason,
+					judge_raw: judgeResult.raw,
+					duration_ms: stepDuration, timestamp: stepTimestamp,
+				};
+				printStep(line, testCase.steps.length);
+				if (enableTrace) traceLines.push(JSON.stringify(line));
+
+				if (finalVerdict !== 'PASS') { allPassed = false; }
+				stepDone = true;
 			}
 			if (!allPassed) break;
 		}
@@ -491,7 +555,7 @@ async function cmdRun(specPath, opts) {
 		if (testCase.teardown) {
 			for (const cmd of testCase.teardown) {
 				const result = await shell.exec(cmd, 10000);
-				const line = { type: 'teardown', command: cmd, stdout: result.stdout, exit_code: result.exitCode, timestamp: new Date().toISOString() };
+				const line = { type: 'teardown', command: cmd, stdout: result.stdout, stderr: result.stderr, exit_code: result.exitCode, timestamp: new Date().toISOString() };
 				printTeardown(line);
 				if (enableTrace) traceLines.push(JSON.stringify(line));
 			}
@@ -652,7 +716,7 @@ Usage: atest run <spec.yaml> [options]
 Options:
   --api-key <key>       LLM API key (or ATEST_API_KEY env)
   --base-url <url>      LLM endpoint (or ATEST_BASE_URL env)
-  --model <name>        Model name (or ATEST_MODEL env, required for LLM judgment)
+  --model <name>        Model name (or ATEST_MODEL env, required for judge type: llm)
   -o, --output <path>   JSONL trace path (default: <stem>-<timestamp>.jsonl)
   --no-trace            Disable trace output
   -h, --help            Show this help
@@ -660,7 +724,7 @@ Options:
 Environment:
   ATEST_API_KEY         LLM API key
   ATEST_BASE_URL        LLM API endpoint
-  ATEST_MODEL           LLM model name (required for LLM judgment)
+  ATEST_MODEL           LLM model name (required for judge type: llm)
 
 CLI flags override environment variables.`);
 }

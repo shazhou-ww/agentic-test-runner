@@ -1,6 +1,3 @@
-# Example test case for cli-testkit
-# Run: node index.mjs examples/basic.yaml --provider dashscope
-
 name: "Basic shell commands"
 description: "Verify basic shell command outputs"
 
@@ -8,14 +5,19 @@ cwd: /tmp
 
 steps:
   - command: "echo hello world"
-    judge_prompt: "输出应包含 'hello world'"
+    judge:
+      type: regex
+      expr: "hello world"
     timeout: 5
 
   - command: "mkdir -p cli-testkit-demo && cd cli-testkit-demo && pwd"
-    judge_prompt: "输出应为 /tmp/cli-testkit-demo，证明 cd 在 persistent shell 中生效"
+    judge:
+      type: regex
+      expr: "/tmp/cli-testkit-demo"
 
   - command: "echo 'content' > test.txt && cat test.txt"
-    judge_prompt: "输出应包含 'content'"
+    judge:
+      type: regex
+      expr: "content"
 
   - command: "rm -rf /tmp/cli-testkit-demo"
-    judge_prompt: "无报错，清理成功"

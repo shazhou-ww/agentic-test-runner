@@ -1,6 +1,4 @@
 # Example: retry / async steps
-# Run: atest run examples/retry.yaml
-
 name: "Retry examples"
 description: "Demonstrate retry on transition and judged steps"
 
@@ -8,7 +6,7 @@ setup:
   - "rm -f /tmp/atest-retry-demo"
 
 steps:
-  # Transition step with retry — no LLM needed
+  # Transition step with retry — no judge needed
   # Creates marker on first attempt, passes on second
   - command: "test -f /tmp/atest-retry-demo || (touch /tmp/atest-retry-demo; false)"
     retry:
@@ -16,8 +14,21 @@ steps:
       interval: 1
       backoff: false
 
-  # Regular transition step
+  # Regex judge step
   - command: "echo marker exists"
+    judge:
+      type: regex
+      expr: "marker exists"
+
+  # JSONata judge step with retry (would need real service to test RETRY)
+  # - command: "curl -s http://localhost:8080/api/status | jq -r '.state'"
+  #   judge:
+  #     type: jsonata
+  #     expr: "$json(stdout) = 'running'"
+  #   retry:
+  #     max: 5
+  #     interval: 10
+  #     backoff: true
 
   # Transition step with retry that exhausts (always fails)
   # Uncomment to test:

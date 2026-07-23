@@ -13,26 +13,40 @@ export interface RetryConfig {
 	backoff?: boolean;
 }
 
+export interface LLMJudge {
+	type: 'llm';
+	/** Natural language criteria for the LLM to judge against */
+	prompt: string;
+}
+
+export interface JSONataJudge {
+	type: 'jsonata';
+	/** JSONata expression evaluated against { stdout, stderr, exit_code }. Truthy = PASS */
+	expr: string;
+}
+
+export interface RegexJudge {
+	type: 'regex';
+	/** Regex pattern matched against stdout. Match = PASS */
+	expr: string;
+}
+
+export type Judge = LLMJudge | JSONataJudge | RegexJudge;
+
 export interface TestSpec {
 	/** Test case name (shown in stdout + trace meta) */
 	name: string;
-
 	/** What this test case tests (shown to LLM judge as context) */
 	description?: string;
-
 	/**
 	 * Working directory for the persistent shell.
 	 * Relative to the spec file's location. Machine-independent.
-	 * Example: "./test-workspace" or "../shared/fixtures"
 	 */
 	cwd?: string;
-
 	/** Commands to run before steps (not judged) */
 	setup?: string[];
-
 	/** Commands to run after steps (always runs, even on FAIL) */
 	teardown?: string[];
-
 	/** Test steps — the core of the spec */
 	steps: TestStep[];
 }
@@ -42,11 +56,10 @@ export interface TestStep {
 	command: string;
 
 	/**
-	 * Criteria for the LLM to judge PASS/FAIL/RETRY (natural language).
-	 * If omitted, this is a "transition step" — auto-judged by exit code
-	 * (0 = PASS, non-zero = FAIL or RETRY if retry configured), no LLM call.
+	 * Judge configuration. If omitted, this is a "transition step" —
+	 * auto-judged by exit code (0 = PASS, non-zero = FAIL or RETRY if retry configured).
 	 */
-	judge_prompt?: string;
+	judge?: Judge;
 
 	/** Timeout in seconds for the command itself (default: 30) */
 	timeout?: number;
@@ -54,8 +67,6 @@ export interface TestStep {
 	/**
 	 * Retry configuration for async/long-running operations.
 	 * When enabled, the step can return RETRY and be re-executed after waiting.
-	 * For judged steps: LLM can return RETRY verdict.
-	 * For transition steps: non-zero exit code triggers RETRY.
 	 */
 	retry?: RetryConfig;
 }
@@ -80,6 +91,7 @@ export interface TraceLifecycle {
 	type: 'setup' | 'teardown';
 	command: string;
 	stdout: string;
+	stderr: string;
 	exit_code: number;
 	timestamp: string; // ISO 8601
 }
@@ -88,21 +100,23 @@ export interface TraceLifecycle {
 export interface TraceStep {
 	type: 'step';
 	index: number;
-	/** Retry attempt number (0 = first try, 1 = first retry, etc.) */
+	/** Retry attempt number (0 = first try, 1+ = retries) */
 	attempt: number;
 	command: string;
 	stdout: string;
+	stderr: string;
 	exit_code: number;
 	timed_out: boolean;
-	/** Working directory at the time this step executed (after any cd in prior steps) */
+	/** Working directory at the time this step executed */
 	cwd: string | null;
-	judge_prompt: string | null;
+	/** Judge type: 'llm', 'jsonata', 'regex', or 'exit_code' (transition step) */
+	judge_type: 'llm' | 'jsonata' | 'regex' | 'exit_code';
+	/** The prompt (llm), expression (jsonata/regex), or null (exit_code) */
+	judge_input: string | null;
 	judge_verdict: 'PASS' | 'FAIL' | 'RETRY';
 	judge_reason: string;
-	/** Full raw LLM response (null for transition steps) */
+	/** Full raw LLM response (null for non-LLM judges) */
 	judge_raw: string | null;
-	/** "llm" if judged by LLM, "exit_code" if auto-judged (transition step) */
-	judge_method: 'llm' | 'exit_code';
 	duration_ms: number;
 	timestamp: string; // ISO 8601
 }

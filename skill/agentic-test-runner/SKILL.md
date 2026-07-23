@@ -15,10 +15,10 @@ Write YAML test specs, run them with `atest`, read the JSONL trace.
 atest 的设计是 Agent 负责写和跑，人负责 review。学完这个 skill 后，告诉 user 你能做什么：
 
 1. **等 user 给你一个 CLI 工具** — user 会说"帮我测一下 my-tool 的某某功能"
-2. **你写 YAML spec** — 把命令和 judge_prompt 写好，拿给 user 看第一轮 review
-3. **user review spec** — 检查 judge_prompt 够不够具体、命令覆盖全不全。user 可能要求加 case 或改 prompt
+2. **你写 YAML spec** — 把命令和 judge 写好，拿给 user 看第一轮 review
+3. **user review spec** — 检查 judge 够不够具体、命令覆盖全不全。user 可能要求加 case 或改 prompt
 4. **你跑 `atest run`** — 执行 spec，生成 trace
-5. **user review trace** — 看 LLM 的判定结果和理由，确认有没有误判
+5. **user review trace** — 看判定结果和理由，确认有没有误判
 6. **按 feedback 迭代** — 改 spec 或改代码，重跑，直到全过
 
 告诉 user：你准备好了写 CLI 测试规格，给他一个 CLI 工具名和要验证的场景，你就能开始。
@@ -46,9 +46,13 @@ Create a YAML file. Each spec has a name, optional setup/teardown, and a list of
 name: "My CLI test"
 steps:
   - command: "my-tool --version"
-    judge_prompt: "输出应包含版本号 x.y.z 格式"
+    judge:
+      type: regex
+      expr: "[0-9]+\\.[0-9]+\\.[0-9]+"
   - command: "my-tool --help 2>&1 | head -20"
-    judge_prompt: "应显示用法说明和至少 3 个选项"
+    judge:
+      type: llm
+      prompt: "应显示用法说明和至少 3 个选项"
 ```
 
 ### Full schema
@@ -63,7 +67,10 @@ teardown:                     # optional, always runs (even on FAIL)
   - "rm -rf /tmp/workspace"
 steps:                        # required
   - command: "some command"   #   required, shell command
-    judge_prompt: "criteria"  #   optional, see below
+    judge:                    #   optional — omit for transition step (exit code judge)
+      type: llm               #     llm | jsonata | regex
+      prompt: "criteria"      #     llm: natural language prompt
+      # expr: "expression"    #     jsonata/regex: the expression/pattern
     timeout: 30               #   optional, seconds (default 30)
     retry:                    #   optional — retry config for async operations
       max: 3                  #     max retries (default: 3)
@@ -71,21 +78,41 @@ steps:                        # required
       backoff: false          #     false=fixed, true=exponential (default: false)
 ```
 
-### Two types of steps
+### Judge types
 
-**Judged step** (has `judge_prompt`):
+**`type: llm`** — LLM reads stdout + stderr + exit code and judges against the prompt. Returns PASS/FAIL/RETRY. Most flexible, costs tokens.
+
 ```yaml
-- command: "echo hello"
-  judge_prompt: "输出应包含 'hello'"
+- command: "my-tool config show"
+  judge:
+    type: llm
+    prompt: "输出应为 JSON，包含 host 和 port 字段"
 ```
-LLM reads the command output + judge_prompt and returns PASS/FAIL.
 
-**Transition step** (no `judge_prompt`):
+**`type: regex`** — Regex matched against stdout (trimmed). Match = PASS. Zero LLM cost.
+
+```yaml
+- command: "my-tool --version"
+  judge:
+    type: regex
+    expr: "[0-9]+\\.[0-9]+\\.[0-9]+"
+```
+
+**`type: jsonata`** — JSONata expression evaluated against `{ stdout, stderr, exit_code }`. Truthy = PASS. Most flexible deterministic judge.
+
+```yaml
+- command: "curl -s http://localhost:8080/api/status"
+  judge:
+    type: jsonata
+    expr: "$json(stdout).status = 'healthy' and exit_code = 0"
+```
+
+**No `judge` field** (transition step) — Auto-judged by exit code: 0 = PASS, non-zero = FAIL. No LLM call. Use for cd, mkdir, file creation.
+
 ```yaml
 - command: "cd /tmp/project"
 - command: "mkdir -p build"
 ```
-Auto-judged by exit code: 0 = PASS, non-zero = FAIL. No LLM call, saves tokens and time.
 
 Use transition steps for setup-like actions within the test flow (cd, mkdir, file creation) that don't need semantic judgment.
 
@@ -95,12 +122,14 @@ Some operations are async — a service starting up, a resource being created. I
 
 **How it works:**
 
-| Has `judge_prompt` | Has `retry` | RETRY triggered by | LLM call? |
+| Judge type | Has `retry` | RETRY triggered by | LLM call? |
 |:-:|:-:|---|:-:|
-| ✅ | ✅ | LLM returns `VERDICT: RETRY` | ✅ |
-| ✅ | ❌ | N/A (PASS/FAIL only) | ✅ |
-| ❌ | ✅ | exit code non-zero | ❌ |
-| ❌ | ❌ | N/A (PASS/FAIL only) | ❌ |
+| `llm` | ✅ | LLM returns `VERDICT: RETRY` | ✅ |
+| `llm` | ❌ | N/A (PASS/FAIL only) | ✅ |
+| `regex`/`jsonata` | ✅ | expression false → auto-RETRY | ❌ |
+| `regex`/`jsonata` | ❌ | N/A (PASS/FAIL only) | ❌ |
+| none (transition) | ✅ | exit code non-zero | ❌ |
+| none (transition) | ❌ | N/A (PASS/FAIL only) | ❌ |
 
 **Transition step with retry** (no LLM — pure polling):
 ```yaml
@@ -112,10 +141,12 @@ Some operations are async — a service starting up, a resource being created. I
 ```
 Exit 0 = PASS, non-zero = RETRY. Tries every 5s, up to 10 retries.
 
-**Judged step with retry** (LLM distinguishes "not ready" vs "broken"):
+**LLM judge with retry** (LLM distinguishes "not ready" vs "broken"):
 ```yaml
 - command: "curl -s http://localhost:8080/api/status | jq -r '.state'"
-  judge_prompt: "输出应为 'running' 或 'healthy'"
+  judge:
+    type: llm
+    prompt: "输出应为 'running' 或 'healthy'"
   retry:
     max: 5
     interval: 10
@@ -123,22 +154,43 @@ Exit 0 = PASS, non-zero = RETRY. Tries every 5s, up to 10 retries.
 ```
 LLM sees `"starting"` → RETRY. Sees `"error"` → FAIL. Only PASS when output clearly meets criteria.
 
+**Deterministic judge with retry** (regex/jsonata FAIL auto-converts to RETRY):
+```yaml
+- command: "curl -s http://localhost:8080/api/status"
+  judge:
+    type: jsonata
+    expr: "$json(stdout).state = 'running'"
+  retry:
+    max: 5
+    interval: 10
+```
+Expression false → RETRY. Can't distinguish "not ready" from "broken" — always retries until max.
+
 **When retry is exhausted:** RETRY converts to FAIL. `max` is the number of retries (not counting the first try).
 
 **Backoff:** `false` = fixed interval. `true` = exponential (`interval × 2^attempt`).
 
-### Writing good judge_prompts
+### Writing good LLM judge prompts
 
 ```yaml
 # GOOD — specific, verifiable
-judge_prompt: "输出应包含版本号，格式为 x.y.z"
-judge_prompt: "exit code 应为 1，输出应包含 'Error: not found'"
-judge_prompt: "输出应为 JSON 数组，包含至少 2 个元素，每个有 id 和 name"
-judge_prompt: "应列出至少 3 个 workflow"
+judge:
+  type: llm
+  prompt: "输出应包含版本号，格式为 x.y.z"
+judge:
+  type: llm
+  prompt: "exit code 应为 1，输出应包含 'Error: not found'"
+judge:
+  type: llm
+  prompt: "输出应为 JSON 数组，包含至少 2 个元素，每个有 id 和 name"
 
 # BAD — vague, not verifiable
-judge_prompt: "看起来正常"
-judge_prompt: "应该工作"
+judge:
+  type: llm
+  prompt: "看起来正常"
+judge:
+  type: llm
+  prompt: "应该工作"
 ```
 
 Rules:
@@ -149,24 +201,30 @@ Rules:
 
 ### ⚠️ Control output size
 
-The LLM judge sees **all previous step outputs** in its context. A step that outputs 500 lines will blow up the context for every subsequent step.
+The LLM judge sees **all previous step outputs** (stdout + stderr) in its context. A step that outputs 500 lines will blow up the context for every subsequent step.
 
 **Always trim command output. Keep only what the judge needs:**
 
 ```yaml
 # GOOD — trimmed
 - command: "npm test 2>&1 | tail -20"
-  judge_prompt: "输出应包含 'all tests passed'"
+  judge:
+    type: llm
+    prompt: "输出应包含 'all tests passed'"
 - command: "curl -s http://localhost:8080/health | jq '.status'"
-  judge_prompt: "输出应为 up 或 healthy"
+  judge:
+    type: llm
+    prompt: "输出应为 up 或 healthy"
 - command: "ls -la | head -20"
-  judge_prompt: "应列出至少 5 个文件"
+  judge:
+    type: llm
+    prompt: "应列出至少 5 个文件"
 
 # BAD — untrimmed, could be hundreds of lines
 - command: "npm test"
-  judge_prompt: "所有测试通过"
-- command: "cat huge-config.json"
-  judge_prompt: "配置正确"
+  judge:
+    type: llm
+    prompt: "所有测试通过"
 ```
 
 | Technique | Example |
@@ -275,10 +333,11 @@ stdout is brief — command, exit code, verdict, one-line reason:
 
 ### Workflow
 
-1. **Write spec** — create YAML file with steps
-2. **Run with LLM** — `atest run spec.yaml` (ensure ATEST_API_KEY is set)
-3. **Check trace** — read the JSONL file for detailed results
-4. **Iterate** — fix failures, re-run
+1. **Write spec** — create YAML file with steps and judge config
+2. **Have user review spec** — check judge prompts/expressions and coverage
+3. **Run** — `atest run spec.yaml` (ensure ATEST_API_KEY is set for `type: llm` steps)
+4. **Have user review trace** — check verdicts and reasons
+5. **Iterate** — fix spec or code, re-run
 
 ## How to read the trace
 
@@ -301,15 +360,16 @@ summary    ← final result (pass/fail/retried counts, duration)
 | `index` | Step number (0-based) |
 | `attempt` | Retry attempt (0 = first try, 1+ = retries) |
 | `command` | Shell command executed |
-| `stdout` | Full command output (not truncated in trace) |
+| `stdout` | Full command stdout (not truncated in trace) |
+| `stderr` | Full command stderr |
 | `exit_code` | Process exit code |
 | `timed_out` | Whether the step timed out |
 | `cwd` | Working directory when step executed (after any cd in prior steps) |
-| `judge_prompt` | Criteria given to LLM (null for transition steps) |
+| `judge_type` | `llm`, `jsonata`, `regex`, or `exit_code` (transition step) |
+| `judge_input` | The prompt (llm), expression (jsonata/regex), or null (exit_code) |
 | `judge_verdict` | `PASS`, `FAIL`, or `RETRY` |
 | `judge_reason` | One-line explanation |
-| `judge_raw` | Full raw LLM response (null for transition steps) |
-| `judge_method` | `llm` (LLM judged) or `exit_code` (auto-judged transition) |
+| `judge_raw` | Full raw LLM response (null for non-LLM judges) |
 | `duration_ms` | Execution time in milliseconds |
 | `timestamp` | ISO 8601 timestamp when step completed |
 
@@ -323,7 +383,7 @@ atest show my-test-*.jsonl
 jq -r 'select(.type=="summary") | .result' trace.jsonl
 
 # Show all steps with verdicts
-jq -r 'select(.type=="step") | "[\(.index)] attempt=\(.attempt) \(.judge_method) \(.judge_verdict): \(.judge_reason)"' trace.jsonl
+jq -r 'select(.type=="step") | "[\(.index)] attempt=\(.attempt) \(.judge_type) \(.judge_verdict): \(.judge_reason)"' trace.jsonl
 
 # Show only failures
 jq 'select(.type=="step" and .judge_verdict=="FAIL")' trace.jsonl

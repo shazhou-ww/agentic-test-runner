@@ -80,7 +80,9 @@ teardown:                       # 可选，总是执行（即使 FAIL）
 
 steps:                          # 必填
   - command: "some command"     #   必填，shell 命令
-    judge_prompt: "expected"    #   可选 — 不写就按 exit code 判（0=PASS）
+    judge:                      #   可选 — 不写就按 exit code 判（0=PASS）
+      type: llm                 #     llm | jsonata | regex
+      prompt: "预期描述"        #     llm: 自然语言；jsonata: 表达式；regex: 匹配 stdout
     timeout: 30                 #   可选，秒（默认 30）
     retry:                      #   可选 — 异步重试
       max: 3                    #     最多重试几次（默认 3）
@@ -88,20 +90,39 @@ steps:                          # 必填
       backoff: false            #     false=固定间隔, true=指数退避
 ```
 
-### 两种 step
+### 三种 judge
 
-**有 judge_prompt** — LLM 读输出做语义判定。这是 review 重点：prompt 够不够具体？
+**`type: llm`** — LLM 读输出做语义判定。灵活但花 token。review 重点：prompt 够不够具体？
 
 ```yaml
 # ✅ 好 — 具体、可验证
-judge_prompt: "输出应包含版本号，格式为 x.y.z"
-judge_prompt: "exit code 应为 1，输出应包含 'Error: not found'"
+judge:
+  type: llm
+  prompt: "输出应包含版本号，格式为 x.y.z"
 
 # ❌ 差 — 模糊
-judge_prompt: "看起来正常"
+judge:
+  type: llm
+  prompt: "看起来正常"
 ```
 
-**没有 judge_prompt**（transition step）— 纯 exit code 判定，0=PASS 非0=FAIL。用于 cd、mkdir 等不需要语义判断的步骤。
+**`type: regex`** — 正则匹配 stdout，匹配到 = PASS。零 LLM 开销。
+
+```yaml
+judge:
+  type: regex
+  expr: "[0-9]+\\.[0-9]+\\.[0-9]+"   # 版本号
+```
+
+**`type: jsonata`** — JSONata 表达式，输入 `{ stdout, stderr, exit_code }`。truthy = PASS。最灵活的确定性判定。
+
+```yaml
+judge:
+  type: jsonata
+  expr: "$json(stdout).status = 'healthy' and exit_code = 0"
+```
+
+**不写 `judge`**（transition step）— 纯 exit code 判定，0=PASS 非0=FAIL。用于 cd、mkdir 等。
 
 ### retry
 
@@ -114,20 +135,24 @@ judge_prompt: "看起来正常"
     interval: 5
 ```
 
-有 judge_prompt + retry 时，LLM 可以返回 RETRY（"还没就绪，再等等"）而不是直接 FAIL。
+确定性 judge（regex/jsonata/exit_code）的 FAIL 在有 retry 时自动转为 RETRY。LLM judge 自己决定 RETRY（"还没就绪"）还是 FAIL（"坏了"）。
 
 ### ⚠️ 输出裁剪
 
-LLM 会看到**所有前序步骤的输出**。一条 `npm test` 输出几百行会撑爆 context。review 时注意命令有没有裁剪：
+LLM judge 会看到**所有前序步骤的输出**（含 stderr）。一条 `npm test` 输出几百行会撑爆 context。review 时注意命令有没有裁剪：
 
 ```yaml
 # ✅ 好 — 裁剪过
 - command: "npm test 2>&1 | tail -20"
-  judge_prompt: "输出应包含 'all tests passed'"
+  judge:
+    type: llm
+    prompt: "输出应包含 'all tests passed'"
 
 # ❌ 差 — 原始输出
 - command: "npm test"
-  judge_prompt: "所有测试通过"
+  judge:
+    type: llm
+    prompt: "所有测试通过"
 ```
 
 ## 怎么跑
@@ -185,7 +210,7 @@ trace 是 JSONL，每行一个 JSON 对象。想精确查某个字段时用 jq�
 jq -r 'select(.type=="summary") | .result' my-test-*.jsonl
 
 # 所有 step 的判定
-jq -r 'select(.type=="step") | "[\(.index)] attempt=\(.attempt) \(.judge_verdict): \(.judge_reason)"' my-test-*.jsonl
+jq -r 'select(.type=="step") | "[\(.index)] attempt=\(.attempt) \(.judge_type) \(.judge_verdict): \(.judge_reason)"' my-test-*.jsonl
 
 # 只看失败的
 jq 'select(.type=="step" and .judge_verdict=="FAIL")' my-test-*.jsonl
