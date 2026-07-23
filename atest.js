@@ -7,15 +7,12 @@
  *   atest run <spec.yaml> [options]   Execute spec, judge with LLM, output trace
  *   atest show <trace.jsonl>          Replay trace as human-readable stdout
  *
- * Shorthand: atest <spec.yaml> = atest run <spec.yaml>
- *
  * Options (run):
  *   --api-key <key>     LLM API key (or ATEST_API_KEY env)
  *   --base-url <url>    LLM API endpoint (or ATEST_BASE_URL env)
  *   --model <name>      LLM model name (or ATEST_MODEL env, required for LLM judgment)
  *   -o, --output <path>  JSONL trace path (default: <stem>-<timestamp>.jsonl)
  *   --no-trace          Disable trace output
- *   --dry-run           Execute commands but skip LLM judgment
  *
  * Environment:
  *   ATEST_API_KEY       LLM API key
@@ -211,7 +208,7 @@ function printBanner(meta, tracePath) {
 	console.log(`\n🧪 atest — LLM-judged CLI test runner`);
 	console.log(`   Case: ${meta.name ?? '(unnamed)'}`);
 	console.log(`   Steps: ${meta.total_steps ?? '?'}`);
-	console.log(`   Judge: ${meta.model ?? '?'} @ ${meta.base_url || '(dry-run)'}`);
+	console.log(`   Judge: ${meta.model || '(none)'} ${meta.base_url ? '@ ' + meta.base_url : ''}`);
 	if (meta.cwd) console.log(`   CWD: ${meta.cwd}`);
 	if (tracePath) console.log(`   Trace: ${tracePath}`);
 	console.log('');
@@ -227,9 +224,7 @@ function printStep(line, totalSteps) {
 	console.log(`  ${truncateOutput(line.stdout)}`);
 	console.log(`  [exit: ${line.exit_code}]`);
 
-	if (line.judge_verdict === 'SKIP') {
-		console.log(`  ⏭️  dry-run, skipping judgment`);
-	} else if (line.judge_verdict === 'PASS') {
+	if (line.judge_verdict === 'PASS') {
 		console.log(`  ✅ PASS: ${line.judge_reason}`);
 	} else {
 		console.log(`  ❌ FAIL: ${line.judge_reason}`);
@@ -285,7 +280,7 @@ async function cmdRun(specPath, opts) {
 	const baseUrl = opts['base-url'] ?? process.env.ATEST_BASE_URL ?? '';
 	const model = opts.model ?? process.env.ATEST_MODEL ?? '';
 
-	const needsLLM = !opts['dry-run'] && testCase.steps.some((s) => s.judge_prompt);
+	const needsLLM = testCase.steps.some((s) => s.judge_prompt);
 	if (needsLLM && !apiKey) {
 		console.error('No API key. Set ATEST_API_KEY or use --api-key');
 		process.exit(1);
@@ -348,20 +343,6 @@ async function cmdRun(specPath, opts) {
 			const result = await shell.exec(step.command, timeout);
 			const stepDuration = Date.now() - stepStart;
 			const stepTimestamp = new Date().toISOString();
-
-			if (opts['dry-run']) {
-				const line = {
-					type: 'step', index: i, command: step.command, stdout: result.stdout,
-					exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
-					judge_prompt: step.judge_prompt ?? null, judge_verdict: 'SKIP',
-					judge_reason: 'dry-run', judge_raw: null, judge_method: null,
-					duration_ms: stepDuration, timestamp: stepTimestamp,
-				};
-				printStep(line, testCase.steps.length);
-				if (enableTrace) traceLines.push(JSON.stringify(line));
-				stepResults.push({ ...result, judgeReason: 'dry-run', judgeVerdict: 'SKIP' });
-				continue;
-			}
 
 			stepResults.push({ ...result, judgeReason: null });
 
@@ -426,7 +407,6 @@ async function cmdRun(specPath, opts) {
 	const totalCount = stepResults.length;
 	const passedCount = stepResults.filter((r) => r.judgeVerdict === 'PASS').length;
 	const failedCount = stepResults.filter((r) => r.judgeVerdict === 'FAIL').length;
-	const skippedCount = stepResults.filter((r) => r.judgeVerdict === 'SKIP').length;
 
 	const summaryLine = {
 		type: 'summary',
@@ -434,7 +414,6 @@ async function cmdRun(specPath, opts) {
 		executed_steps: totalCount,
 		passed: passedCount,
 		failed: failedCount,
-		skipped: skippedCount,
 		result: allPassed ? 'PASS' : 'FAIL',
 		duration_ms: totalDuration,
 		ended_at: endedAt,
@@ -493,8 +472,6 @@ async function cmdShow(tracePath) {
 
 async function main() {
 	const args = process.argv.slice(2);
-
-	// Subcommand detection
 	const subcommand = args[0];
 	const rest = args.slice(1);
 
@@ -505,25 +482,37 @@ async function main() {
 				'base-url': { type: 'string' },
 				model: { type: 'string' },
 				output: { type: 'string', short: 'o' },
-				'no-trace': { type: 'boolean', default: false },
-				'dry-run': { type: 'boolean', default: false },
+			'no-trace': { type: 'boolean', default: false },
+			help: { type: 'boolean', short: 'h' },
 			},
 			allowPositionals: true,
 			args: rest,
 		});
 
+		if (values.help) {
+			printRunHelp();
+			process.exit(0);
+		}
 		if (positionals.length === 0) {
 			console.error('Usage: atest run <spec.yaml> [options]');
+			console.error('Run "atest run --help" for details');
 			process.exit(1);
 		}
 
 		await cmdRun(positionals[0], values);
 	} else if (subcommand === 'show') {
-		const { positionals } = parseArgs({
+		const { values, positionals } = parseArgs({
+			options: {
+				help: { type: 'boolean', short: 'h' },
+			},
 			allowPositionals: true,
 			args: rest,
 		});
 
+		if (values.help) {
+			printShowHelp();
+			process.exit(0);
+		}
 		if (positionals.length === 0) {
 			console.error('Usage: atest show <trace.jsonl>');
 			process.exit(1);
@@ -533,27 +522,13 @@ async function main() {
 	} else if (subcommand === '--version' || subcommand === '-V') {
 		console.log(`atest ${pkg.version}`);
 		process.exit(0);
-	} else if (subcommand === '--help' || subcommand === '-h') {
+	} else if (subcommand === '--help' || subcommand === '-h' || subcommand === undefined) {
 		printHelp();
 		process.exit(0);
-	} else if (subcommand && !subcommand.startsWith('-')) {
-		// Shorthand: atest <spec.yaml> = atest run <spec.yaml>
-		const { values, positionals } = parseArgs({
-			options: {
-				'api-key': { type: 'string' },
-				'base-url': { type: 'string' },
-				model: { type: 'string' },
-				output: { type: 'string', short: 'o' },
-				'no-trace': { type: 'boolean', default: false },
-				'dry-run': { type: 'boolean', default: false },
-			},
-			allowPositionals: true,
-		});
-
-		await cmdRun(positionals[0], values);
 	} else {
+		console.error(`Unknown command: ${subcommand}`);
 		printHelp();
-		process.exit(subcommand ? 1 : 0);
+		process.exit(1);
 	}
 }
 
@@ -562,16 +537,25 @@ function printHelp() {
 
 Usage:
   atest run <spec.yaml> [options]   Execute spec, judge with LLM
-  atest show <trace.jsonl>           Replay trace as human-readable output
-  atest <spec.yaml> [options]        Shorthand for "atest run"
+  atest show <trace.jsonl>          Replay trace as human-readable output
+  atest -V, --version               Print version
+  atest -h, --help                  Show this help
 
-Options (run):
+Run "atest run --help" or "atest show --help" for subcommand details.`);
+}
+
+function printRunHelp() {
+	console.log(`atest run — execute a test spec
+
+Usage: atest run <spec.yaml> [options]
+
+Options:
   --api-key <key>       LLM API key (or ATEST_API_KEY env)
   --base-url <url>      LLM endpoint (or ATEST_BASE_URL env)
   --model <name>        Model name (or ATEST_MODEL env, required for LLM judgment)
   -o, --output <path>   JSONL trace path (default: <stem>-<timestamp>.jsonl)
   --no-trace            Disable trace output
-  --dry-run             Execute commands, skip LLM judgment
+  -h, --help            Show this help
 
 Environment:
   ATEST_API_KEY         LLM API key
@@ -579,6 +563,15 @@ Environment:
   ATEST_MODEL           LLM model name (required for LLM judgment)
 
 CLI flags override environment variables.`);
+}
+
+function printShowHelp() {
+	console.log(`atest show — replay a trace as human-readable output
+
+Usage: atest show <trace.jsonl>
+
+Reads a JSONL trace file and prints the same human-readable output
+that was shown during "atest run".`);
 }
 
 main().catch((err) => {

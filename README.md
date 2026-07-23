@@ -38,12 +38,6 @@ export ATEST_MODEL=glm-5.2
 # Run
 atest run my-test.yaml
 
-# Shorthand (same as "atest run")
-atest my-test.yaml
-
-# Dry run (no LLM)
-atest run my-test.yaml --dry-run
-
 # Replay a trace as human-readable output
 atest show my-test-20260723-120000.jsonl
 ```
@@ -54,9 +48,10 @@ atest show my-test-20260723-120000.jsonl
 |---------|-------------|
 | `atest run <spec.yaml> [options]` | Execute spec, judge with LLM, write trace |
 | `atest show <trace.jsonl>` | Replay trace as human-readable stdout |
-| `atest <spec.yaml> [options]` | Shorthand for `atest run` |
 | `atest -V, --version` | Print version |
 | `atest -h, --help` | Show help |
+| `atest run -h` | Show run options |
+| `atest show -h` | Show show usage |
 
 ## Output
 
@@ -176,7 +171,6 @@ The LLM judge sees **all previous step outputs**. Trim long outputs:
 | `--model <name>` | Model name (or `ATEST_MODEL` env) | env |
 | `-o, --output <path>` | JSONL trace path | `<stem>-<timestamp>.jsonl` |
 | `--no-trace` | Disable trace file | enabled |
-| `--dry-run` | Execute without LLM judgment | off |
 
 ## Environment variables
 
@@ -186,7 +180,7 @@ The LLM judge sees **all previous step outputs**. Trim long outputs:
 | `ATEST_BASE_URL` | LLM API endpoint |
 | `ATEST_MODEL` | LLM model name |
 
-CLI flags override environment variables. All three are required when LLM judgment is needed (steps with `judge_prompt`). Transition steps and `--dry-run` don't need LLM config.
+CLI flags override environment variables. All three are required when LLM judgment is needed (steps with `judge_prompt`). Transition steps don't need LLM config.
 
 ## License
 

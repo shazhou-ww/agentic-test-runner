@@ -1,6 +1,6 @@
 {
   "name": "agentic-test-runner",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "LLM-judged CLI test runner — define test cases in YAML, execute commands, let an LLM judge PASS/FAIL. Outputs JSONL trace.",
   "type": "module",
   "main": "atest.js",
@@ -8,7 +8,7 @@
     "atest": "./atest.js"
   },
   "scripts": {
-    "test": "node atest.js examples/basic.yaml --dry-run"
+    "test": "node atest.js run examples/basic.yaml --no-trace"
   },
   "keywords": [
     "llm",

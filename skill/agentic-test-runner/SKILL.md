@@ -182,12 +182,6 @@ atest run spec.yaml --api-key sk-xxx --base-url https://... --model glm-5.2
 # Run test with LLM judgment
 atest run my-test.yaml
 
-# Shorthand (same as "atest run")
-atest my-test.yaml
-
-# Dry run — execute commands only, no LLM
-atest run my-test.yaml --dry-run
-
 # Specify trace output path
 atest run my-test.yaml -o /tmp/trace.jsonl
 
@@ -200,7 +194,7 @@ atest run my-test.yaml --no-trace
 
 ### Exit code
 
-- `0` — all steps PASS (or dry-run completed)
+- `0` — all steps PASS
 - `1` — at least one step FAILED
 
 ### stdout output
@@ -227,10 +221,9 @@ stdout is brief — command, exit code, verdict, one-line reason:
 ### Workflow
 
 1. **Write spec** — create YAML file with steps
-2. **Dry run first** — `atest spec.yaml --dry-run` to verify commands work
-3. **Run with LLM** — `atest spec.yaml` (ensure ATEST_API_KEY is set)
-4. **Check trace** — read the JSONL file for detailed results
-5. **Iterate** — fix failures, re-run
+2. **Run with LLM** — `atest run spec.yaml` (ensure ATEST_API_KEY is set)
+3. **Check trace** — read the JSONL file for detailed results
+4. **Iterate** — fix failures, re-run
 
 ## How to read the trace
 
@@ -257,10 +250,10 @@ summary    ← final result (pass/fail counts, duration)
 | `timed_out` | Whether the step timed out |
 | `cwd` | Working directory when step executed (after any cd in prior steps) |
 | `judge_prompt` | Criteria given to LLM (null for transition steps) |
-| `judge_verdict` | `PASS`, `FAIL`, or `SKIP` (dry-run) |
+| `judge_verdict` | `PASS` or `FAIL` |
 | `judge_reason` | One-line explanation |
-| `judge_raw` | Full raw LLM response (null for transition steps/dry-run) |
-| `judge_method` | `llm` (LLM judged), `exit_code` (auto-judged transition), `null` (dry-run) |
+| `judge_raw` | Full raw LLM response (null for transition steps) |
+| `judge_method` | `llm` (LLM judged) or `exit_code` (auto-judged transition) |
 | `duration_ms` | Execution time in milliseconds |
 | `timestamp` | ISO 8601 timestamp when step completed |
 
@@ -302,5 +295,3 @@ jq -r '"\(.timestamp) \(.type) \(.command // "")"' trace.jsonl
 5. **Machine-dependent specs** — don't hardcode absolute paths in the spec. Use `cd` in a setup/transition step. The spec should work on any machine.
 
 6. **Quote carefully** — use `printf` instead of `echo` for multi-line output. Single-quoted `\n` is literal, not a newline.
-
-7. **Dry-run doesn't catch judge_prompt issues** — dry-run skips LLM judgment, so a vague judge_prompt will pass dry-run but fail or give wrong results in real run. Always do a real run to validate judgment quality.

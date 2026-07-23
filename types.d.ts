@@ -77,12 +77,12 @@ export interface TraceStep {
 	/** Working directory at the time this step executed (after any cd in prior steps) */
 	cwd: string | null;
 	judge_prompt: string | null;
-	judge_verdict: 'PASS' | 'FAIL' | 'SKIP';
+	judge_verdict: 'PASS' | 'FAIL';
 	judge_reason: string;
-	/** Full raw LLM response (null in dry-run or transition steps) */
+	/** Full raw LLM response (null for transition steps) */
 	judge_raw: string | null;
-	/** "llm" if judged by LLM, "exit_code" if auto-judged (transition step), null if dry-run */
-	judge_method: 'llm' | 'exit_code' | null;
+	/** "llm" if judged by LLM, "exit_code" if auto-judged (transition step) */
+	judge_method: 'llm' | 'exit_code';
 	duration_ms: number;
 	timestamp: string; // ISO 8601
 }
@@ -94,7 +94,6 @@ export interface TraceSummary {
 	executed_steps: number;
 	passed: number;
 	failed: number;
-	skipped: number;
 	result: 'PASS' | 'FAIL';
 	duration_ms: number;
 	ended_at: string; // ISO 8601
