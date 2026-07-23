@@ -162,7 +162,7 @@ steps:
 
 ### Prerequisites
 
-Set LLM config via environment variables:
+Set LLM config via environment variables (required only for steps with `judge_prompt`):
 
 ```bash
 export ATEST_API_KEY=sk-xxx
@@ -173,23 +173,29 @@ export ATEST_MODEL=glm-5.2
 Or pass via CLI flags (overrides env vars):
 
 ```bash
-atest spec.yaml --api-key sk-xxx --base-url https://... --model glm-5.2
+atest run spec.yaml --api-key sk-xxx --base-url https://... --model glm-5.2
 ```
 
 ### Commands
 
 ```bash
 # Run test with LLM judgment
+atest run my-test.yaml
+
+# Shorthand (same as "atest run")
 atest my-test.yaml
 
-# Dry run — execute commands only, no LLM (useful to verify spec syntax)
-atest my-test.yaml --dry-run
+# Dry run — execute commands only, no LLM
+atest run my-test.yaml --dry-run
 
 # Specify trace output path
-atest my-test.yaml -o /tmp/trace.jsonl
+atest run my-test.yaml -o /tmp/trace.jsonl
+
+# Replay a trace as human-readable output
+atest show my-test-20260723-120000.jsonl
 
 # Disable trace file
-atest my-test.yaml --no-trace
+atest run my-test.yaml --no-trace
 ```
 
 ### Exit code
@@ -258,9 +264,12 @@ summary    ← final result (pass/fail counts, duration)
 | `duration_ms` | Execution time in milliseconds |
 | `timestamp` | ISO 8601 timestamp when step completed |
 
-### Querying trace with jq
+### Querying trace
 
 ```bash
+# Replay as human-readable (same stdout as run)
+atest show my-test-*.jsonl
+
 # Quick pass/fail check
 jq -r 'select(.type=="summary") | .result' trace.jsonl
 

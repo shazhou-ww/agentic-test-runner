@@ -3,28 +3,24 @@
 /**
  * atest — LLM-judged CLI test runner
  *
- * Spec: YAML defines TestStep[] = { command, judge_prompt?, timeout? }
- * Execution: run each command in a persistent shell, collect output
- * Judgment:
- *   - If judge_prompt present → LLM judges PASS/FAIL
- *   - If judge_prompt absent → auto-judge by exit code (0=PASS, non-0=FAIL)
- * Trace: JSONL with timestamp on every line
+ * Subcommands:
+ *   atest run <spec.yaml> [options]   Execute spec, judge with LLM, output trace
+ *   atest show <trace.jsonl>          Replay trace as human-readable stdout
  *
- * Usage:
- *   atest <test-case.yaml> [options]
+ * Shorthand: atest <spec.yaml> = atest run <spec.yaml>
  *
- * Options:
+ * Options (run):
  *   --api-key <key>     LLM API key (or ATEST_API_KEY env)
  *   --base-url <url>    LLM API endpoint (or ATEST_BASE_URL env)
- *   --model <name>      LLM model name (or ATEST_MODEL env, default: glm-5.2)
- *   -o, --output <path>  JSONL trace output path (default: <stem>-<timestamp>.jsonl)
+ *   --model <name>      LLM model name (or ATEST_MODEL env, required for LLM judgment)
+ *   -o, --output <path>  JSONL trace path (default: <stem>-<timestamp>.jsonl)
  *   --no-trace          Disable trace output
  *   --dry-run           Execute commands but skip LLM judgment
  *
- * Environment variables:
- *   ATEST_API_KEY      LLM API key
- *   ATEST_BASE_URL     LLM API endpoint
- *   ATEST_MODEL        LLM model name (default: glm-5.2)
+ * Environment:
+ *   ATEST_API_KEY       LLM API key
+ *   ATEST_BASE_URL      LLM API endpoint
+ *   ATEST_MODEL         LLM model name (required for LLM judgment)
  */
 
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
@@ -64,12 +60,8 @@ class PersistentShell {
 		this.buffer = '';
 		this.marker = `__ATEST_MARKER_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
 
-		this.shell.stdout.on('data', (data) => {
-			this.buffer += data.toString();
-		});
-		this.shell.stderr.on('data', (data) => {
-			this.buffer += data.toString();
-		});
+		this.shell.stdout.on('data', (data) => { this.buffer += data.toString(); });
+		this.shell.stderr.on('data', (data) => { this.buffer += data.toString(); });
 	}
 
 	async exec(command, timeout = 30000) {
@@ -92,11 +84,9 @@ class PersistentShell {
 		let output = result.slice(startIdx + startMarker.length + 1, exitIdx);
 		if (output.startsWith('\n')) output = output.slice(1);
 
-		// Extract exit code
 		const exitLine = result.slice(exitIdx + exitMarker.length, result.indexOf(cwdMarker, exitIdx));
 		const exitCode = Number.parseInt(exitLine.trim(), 10);
 
-		// Extract cwd
 		const cwdStart = result.indexOf(cwdMarker);
 		const cwdEnd = result.indexOf(endMarker, cwdStart);
 		const cwd = cwdStart !== -1 && cwdEnd !== -1
@@ -115,14 +105,9 @@ class PersistentShell {
 		return new Promise((resolve) => {
 			const startTime = Date.now();
 			const check = () => {
-				if (this.buffer.includes(marker)) {
-					resolve(this.buffer);
-					return;
-				}
-				if (Date.now() - startTime > timeout) {
-					resolve(this.buffer + `\n[TIMEOUT after ${timeout}ms]`);
-					return;
-				}
+				if (this.buffer.includes(marker)) return resolve(this.buffer);
+				if (Date.now() - startTime > timeout)
+					return resolve(this.buffer + `\n[TIMEOUT after ${timeout}ms]`);
 				setTimeout(check, 50);
 			};
 			check();
@@ -139,20 +124,13 @@ class PersistentShell {
 
 async function callJudge({ messages, apiKey, baseUrl, model }) {
 	const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
-	const body = {
-		model,
-		messages,
-		temperature: 0,
-		max_tokens: 256,
-	};
-
 	const response = await fetch(url, {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',
 			Authorization: `Bearer ${apiKey}`,
 		},
-		body: JSON.stringify(body),
+		body: JSON.stringify({ model, messages, temperature: 0, max_tokens: 256 }),
 	});
 
 	if (!response.ok) {
@@ -167,10 +145,8 @@ async function callJudge({ messages, apiKey, baseUrl, model }) {
 function parseJudgeResponse(response) {
 	const passMatch = response.match(/VERDICT:\s*(PASS|FAIL)/i);
 	const reasonMatch = response.match(/REASON:\s*(.+)/i);
-
 	const pass = passMatch ? passMatch[1].toUpperCase() === 'PASS' : false;
 	const reason = reasonMatch ? reasonMatch[1].trim() : response.slice(0, 200);
-
 	return { pass, reason };
 }
 
@@ -192,34 +168,22 @@ function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 		messages.push({
 			role: 'assistant',
 			content: null,
-			tool_calls: [
-				{
-					id: `call_${i + 1}`,
-					type: 'function',
-					function: {
-						name: 'terminal',
-						arguments: JSON.stringify({ command: step.command }),
-					},
-				},
-			],
+			tool_calls: [{
+				id: `call_${i + 1}`,
+				type: 'function',
+				function: { name: 'terminal', arguments: JSON.stringify({ command: step.command }) },
+			}],
 		});
 
-		const toolContent = `[exit: ${result.exitCode}]\n${result.stdout}`;
 		messages.push({
 			role: 'tool',
 			tool_call_id: `call_${i + 1}`,
-			content: toolContent,
+			content: `[exit: ${result.exitCode}]\n${result.stdout}`,
 		});
 
 		if (i < currentStepIndex) {
-			messages.push({
-				role: 'user',
-				content: `Step ${i + 1} 预期: ${step.judge_prompt}`,
-			});
-			messages.push({
-				role: 'assistant',
-				content: `VERDICT: PASS\nREASON: ${result.judgeReason ?? 'Passed'}`,
-			});
+			messages.push({ role: 'user', content: `Step ${i + 1} 预期: ${step.judge_prompt}` });
+			messages.push({ role: 'assistant', content: `VERDICT: PASS\nREASON: ${result.judgeReason ?? 'Passed'}` });
 		} else {
 			messages.push({
 				role: 'user',
@@ -241,7 +205,54 @@ function truncateOutput(output, maxLines = 100) {
 	return `${head}\n... [truncated ${lines.length - 80} lines] ...\n${tail}`;
 }
 
-// ─── JSONL Trace ───────────────────────────────────────────────────
+// ─── Shared Printers ──────────────────────────────────────────────
+
+function printBanner(meta, tracePath) {
+	console.log(`\n🧪 atest — LLM-judged CLI test runner`);
+	console.log(`   Case: ${meta.name ?? '(unnamed)'}`);
+	console.log(`   Steps: ${meta.total_steps ?? '?'}`);
+	console.log(`   Judge: ${meta.model ?? '?'} @ ${meta.base_url || '(dry-run)'}`);
+	if (meta.cwd) console.log(`   CWD: ${meta.cwd}`);
+	if (tracePath) console.log(`   Trace: ${tracePath}`);
+	console.log('');
+}
+
+function printSetup(line) {
+	console.log(`  [setup] $ ${line.command}`);
+}
+
+function printStep(line, totalSteps) {
+	console.log(`\n━━━ Step ${line.index + 1}/${totalSteps} ━━━`);
+	console.log(`  $ ${line.command}`);
+	console.log(`  ${truncateOutput(line.stdout)}`);
+	console.log(`  [exit: ${line.exit_code}]`);
+
+	if (line.judge_verdict === 'SKIP') {
+		console.log(`  ⏭️  dry-run, skipping judgment`);
+	} else if (line.judge_verdict === 'PASS') {
+		console.log(`  ✅ PASS: ${line.judge_reason}`);
+	} else {
+		console.log(`  ❌ FAIL: ${line.judge_reason}`);
+	}
+}
+
+function printTeardown(line) {
+	console.log(`  [teardown] $ ${line.command}`);
+}
+
+function printSummary(line, tracePath) {
+	console.log('\n━━━ Summary ━━━');
+	if (line.result === 'PASS') {
+		console.log(`✅ All ${line.executed_steps} steps passed!`);
+	} else {
+		console.log(`❌ ${line.passed}/${line.executed_steps} steps passed`);
+	}
+	if (tracePath) {
+		console.log(`📊 Trace: ${tracePath}`);
+	}
+}
+
+// ─── JSONL Trace Helpers ──────────────────────────────────────────
 
 function timestamp() {
 	const d = new Date();
@@ -249,158 +260,78 @@ function timestamp() {
 	return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
-function defaultTracePath(testCasePath) {
-	const stem = basename(testCasePath).replace(/\.ya?ml$/, '');
+function defaultTracePath(specPath) {
+	const stem = basename(specPath).replace(/\.ya?ml$/, '');
 	return join(process.cwd(), `${stem}-${timestamp()}.jsonl`);
 }
 
-// ─── Main ───────────────────────────────────────────────────────────
+// ─── cmdRun ───────────────────────────────────────────────────────
 
-async function main() {
-const { values, positionals } = parseArgs({
-		options: {
-			'api-key': { type: 'string' },
-			'base-url': { type: 'string' },
-			model: { type: 'string' },
-			output: { type: 'string', short: 'o' },
-			'no-trace': { type: 'boolean', default: false },
-			'dry-run': { type: 'boolean', default: false },
-			version: { type: 'boolean', short: 'V' },
-			help: { type: 'boolean', short: 'h' },
-		},
-		allowPositionals: true,
-	});
-
-	if (values.help) {
-		console.log(`atest — LLM-judged CLI test runner
-
-Usage: atest <test-case.yaml> [options]
-
-Options:
-  --api-key <key>       LLM API key (or ATEST_API_KEY env)
-  --base-url <url>      LLM endpoint (or ATEST_BASE_URL env)
-  --model <name>        Model name (or ATEST_MODEL env, default: glm-5.2)
-  -o, --output <path>   JSONL trace path (default: <stem>-<timestamp>.jsonl)
-  --no-trace            Disable trace output
-  --dry-run             Execute commands, skip LLM judgment
-  -V, --version         Print version and exit
-  -h, --help            Show this help and exit
-
-Environment:
-  ATEST_API_KEY         LLM API key
-  ATEST_BASE_URL        LLM API endpoint
-  ATEST_MODEL           LLM model name (default: glm-5.2)
-
-CLI flags override environment variables.`);
-		process.exit(0);
-	}
-
-	if (values.version) {
-		console.log(`atest ${pkg.version}`);
-		process.exit(0);
-	}
-
-	if (positionals.length === 0) {
-		console.error('Usage: atest <test-case.yaml> [options]');
-		console.error('');
-		console.error('Options:');
-		console.error('  --api-key <key>       LLM API key (or ATEST_API_KEY env)');
-		console.error('  --base-url <url>      LLM endpoint (or ATEST_BASE_URL env)');
-		console.error('  --model <name>        Model name (or ATEST_MODEL env, default: glm-5.2)');
-		console.error('  -o, --output <path>   JSONL trace path (default: <stem>-<timestamp>.jsonl)');
-		console.error('  --no-trace            Disable trace output');
-		console.error('  --dry-run             Execute commands, skip LLM judgment');
-		console.error('');
-		console.error('Environment:');
-		console.error('  ATEST_API_KEY         LLM API key');
-		console.error('  ATEST_BASE_URL        LLM API endpoint');
-		console.error('  ATEST_MODEL           LLM model name (default: glm-5.2)');
+async function cmdRun(specPath, opts) {
+	if (!existsSync(specPath)) {
+		console.error(`Test spec not found: ${specPath}`);
 		process.exit(1);
 	}
 
-	const testCasePath = positionals[0];
-	if (!existsSync(testCasePath)) {
-		console.error(`Test case not found: ${testCasePath}`);
-		process.exit(1);
-	}
-
-	// Parse YAML
-	const rawYaml = readFileSync(testCasePath, 'utf-8');
+	const rawYaml = readFileSync(specPath, 'utf-8');
 	const testCase = parse(rawYaml);
 
-	// Validate
 	if (!testCase.steps || !Array.isArray(testCase.steps)) {
-		console.error('Invalid test case: missing "steps" array');
+		console.error('Invalid test spec: missing "steps" array');
 		process.exit(1);
 	}
 
-	// Resolve LLM config: CLI > env > default
-	const apiKey = values['api-key'] ?? process.env.ATEST_API_KEY ?? '';
-	const baseUrl = values['base-url'] ?? process.env.ATEST_BASE_URL ?? '';
-	const model = values.model ?? process.env.ATEST_MODEL ?? 'glm-5.2';
+	const apiKey = opts['api-key'] ?? process.env.ATEST_API_KEY ?? '';
+	const baseUrl = opts['base-url'] ?? process.env.ATEST_BASE_URL ?? '';
+	const model = opts.model ?? process.env.ATEST_MODEL ?? '';
 
-	// Check if LLM is needed (any step with judge_prompt and not dry-run)
-	const needsLLM = !values['dry-run'] && testCase.steps.some((s) => s.judge_prompt);
+	const needsLLM = !opts['dry-run'] && testCase.steps.some((s) => s.judge_prompt);
 	if (needsLLM && !apiKey) {
 		console.error('No API key. Set ATEST_API_KEY or use --api-key');
 		process.exit(1);
 	}
+	if (needsLLM && !baseUrl) {
+		console.error('No base URL. Set ATEST_BASE_URL or use --base-url');
+		process.exit(1);
+	}
+	if (needsLLM && !model) {
+		console.error('No model. Set ATEST_MODEL or use --model');
+		process.exit(1);
+	}
 
-	// Trace config
-	const enableTrace = !values['no-trace'];
-	const tracePath = enableTrace ? (values.output ?? defaultTracePath(testCasePath)) : null;
+	const enableTrace = !opts['no-trace'];
+	const tracePath = enableTrace ? (opts.output ?? defaultTracePath(specPath)) : null;
 	const traceLines = [];
-
 	const startedAt = new Date().toISOString();
-	// Resolve cwd: relative to spec file location, fallback to process.cwd()
-	const specDir = dirname(testCasePath);
+
+	const specDir = dirname(specPath);
 	const shellCwd = testCase.cwd ? resolve(specDir, testCase.cwd) : process.cwd();
 
-	// stdout: brief banner
-	console.log(`\n🧪 atest — LLM-judged CLI test runner`);
-	console.log(`   Case: ${testCase.name ?? testCasePath}`);
-	console.log(`   Steps: ${testCase.steps.length}`);
-	console.log(`   Judge: ${model} @ ${baseUrl || '(dry-run)'}`);
-	if (testCase.cwd) {
-		console.log(`   CWD: ${shellCwd} (from spec: ${testCase.cwd})`);
-	}
-	if (tracePath) {
-		console.log(`   Trace: ${tracePath}`);
-	}
-	console.log('');
+	// Banner
+	const metaLine = {
+		type: 'meta',
+		name: testCase.name ?? null,
+		description: testCase.description ?? null,
+		cwd: shellCwd,
+		model,
+		base_url: baseUrl || null,
+		total_steps: testCase.steps.length,
+		started_at: startedAt,
+		timestamp: startedAt,
+	};
+	printBanner(metaLine, tracePath);
+	if (enableTrace) traceLines.push(JSON.stringify(metaLine));
 
-	// Trace: meta (verbose)
-	if (enableTrace) {
-		traceLines.push(JSON.stringify({
-			type: 'meta',
-			name: testCase.name ?? null,
-			description: testCase.description ?? null,
-			cwd: shellCwd,
-			model,
-			base_url: baseUrl || null,
-			total_steps: testCase.steps.length,
-			started_at: startedAt,
-			timestamp: startedAt,
-		}));
-	}
-
-	// Create persistent shell with resolved cwd
+	// Shell
 	const shell = new PersistentShell(shellCwd);
 
-	// Run setup commands
+	// Setup
 	if (testCase.setup) {
 		for (const cmd of testCase.setup) {
-			console.log(`  [setup] $ ${cmd}`);
-			const setupResult = await shell.exec(cmd, 10000);
-			if (enableTrace) {
-				traceLines.push(JSON.stringify({
-					type: 'setup',
-					command: cmd,
-					stdout: setupResult.stdout,
-					exit_code: setupResult.exitCode,
-					timestamp: new Date().toISOString(),
-				}));
-			}
+			const result = await shell.exec(cmd, 10000);
+			const line = { type: 'setup', command: cmd, stdout: result.stdout, exit_code: result.exitCode, timestamp: new Date().toISOString() };
+			printSetup(line);
+			if (enableTrace) traceLines.push(JSON.stringify(line));
 		}
 	}
 
@@ -414,47 +345,26 @@ CLI flags override environment variables.`);
 			const timeout = (step.timeout ?? 30) * 1000;
 			const stepStart = Date.now();
 
-			// stdout: brief
-			console.log(`\n━━━ Step ${i + 1}/${testCase.steps.length} ━━━`);
-			console.log(`  $ ${step.command}`);
-
-			// Execute command
 			const result = await shell.exec(step.command, timeout);
-			const truncated = truncateOutput(result.stdout);
-			console.log(`  ${truncated}`);
-			console.log(`  [exit: ${result.exitCode}]`);
 			const stepDuration = Date.now() - stepStart;
 			const stepTimestamp = new Date().toISOString();
 
-			if (values['dry-run']) {
-				console.log(`  ⏭️  dry-run, skipping judgment`);
+			if (opts['dry-run']) {
+				const line = {
+					type: 'step', index: i, command: step.command, stdout: result.stdout,
+					exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
+					judge_prompt: step.judge_prompt ?? null, judge_verdict: 'SKIP',
+					judge_reason: 'dry-run', judge_raw: null, judge_method: null,
+					duration_ms: stepDuration, timestamp: stepTimestamp,
+				};
+				printStep(line, testCase.steps.length);
+				if (enableTrace) traceLines.push(JSON.stringify(line));
 				stepResults.push({ ...result, judgeReason: 'dry-run', judgeVerdict: 'SKIP' });
-
-				if (enableTrace) {
-				traceLines.push(JSON.stringify({
-					type: 'step',
-					index: i,
-					command: step.command,
-					stdout: result.stdout,
-					exit_code: result.exitCode,
-					timed_out: result.timedOut ?? false,
-					cwd: result.cwd,
-					judge_prompt: step.judge_prompt ?? null,
-					judge_verdict: 'SKIP',
-					judge_reason: 'dry-run',
-						judge_raw: null,
-						judge_method: null,
-						duration_ms: stepDuration,
-						timestamp: stepTimestamp,
-					}));
-				}
 				continue;
 			}
 
-			// Push current result before assembly (filled after)
 			stepResults.push({ ...result, judgeReason: null });
 
-			// Determine judgment method
 			if (step.judge_prompt) {
 				// LLM judgment
 				const messages = assembleJudgeMessages(testCase, stepResults, i);
@@ -464,32 +374,17 @@ CLI flags override environment variables.`);
 				stepResults[i].judgeReason = reason;
 				stepResults[i].judgeVerdict = pass ? 'PASS' : 'FAIL';
 
-				if (enableTrace) {
-					traceLines.push(JSON.stringify({
-						type: 'step',
-						index: i,
-						command: step.command,
-						stdout: result.stdout,
-						exit_code: result.exitCode,
-				timed_out: result.timedOut ?? false,
-					cwd: result.cwd,
-					judge_prompt: step.judge_prompt,
-					judge_verdict: pass ? 'PASS' : 'FAIL',
-						judge_reason: reason,
-						judge_raw: judgeResponse,
-						judge_method: 'llm',
-						duration_ms: stepDuration,
-						timestamp: stepTimestamp,
-					}));
-				}
+				const line = {
+					type: 'step', index: i, command: step.command, stdout: result.stdout,
+					exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
+					judge_prompt: step.judge_prompt, judge_verdict: pass ? 'PASS' : 'FAIL',
+					judge_reason: reason, judge_raw: judgeResponse, judge_method: 'llm',
+					duration_ms: stepDuration, timestamp: stepTimestamp,
+				};
+				printStep(line, testCase.steps.length);
+				if (enableTrace) traceLines.push(JSON.stringify(line));
 
-				if (pass) {
-					console.log(`  ✅ PASS: ${reason}`);
-				} else {
-					console.log(`  ❌ FAIL: ${reason}`);
-					allPassed = false;
-					break;
-				}
+				if (!pass) { allPassed = false; break; }
 			} else {
 				// Transition step — auto-judge by exit code
 				const pass = result.exitCode === 0;
@@ -500,49 +395,26 @@ CLI flags override environment variables.`);
 				stepResults[i].judgeReason = reason;
 				stepResults[i].judgeVerdict = pass ? 'PASS' : 'FAIL';
 
-				if (enableTrace) {
-					traceLines.push(JSON.stringify({
-						type: 'step',
-						index: i,
-						command: step.command,
-						stdout: result.stdout,
-						exit_code: result.exitCode,
-				timed_out: result.timedOut ?? false,
-					cwd: result.cwd,
-					judge_prompt: null,
-					judge_verdict: pass ? 'PASS' : 'FAIL',
-						judge_reason: reason,
-						judge_raw: null,
-						judge_method: 'exit_code',
-						duration_ms: stepDuration,
-						timestamp: stepTimestamp,
-					}));
-				}
+				const line = {
+					type: 'step', index: i, command: step.command, stdout: result.stdout,
+					exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
+					judge_prompt: null, judge_verdict: pass ? 'PASS' : 'FAIL',
+					judge_reason: reason, judge_raw: null, judge_method: 'exit_code',
+					duration_ms: stepDuration, timestamp: stepTimestamp,
+				};
+				printStep(line, testCase.steps.length);
+				if (enableTrace) traceLines.push(JSON.stringify(line));
 
-				if (pass) {
-					console.log(`  ✅ PASS: ${reason}`);
-				} else {
-					console.log(`  ❌ FAIL: ${reason}`);
-					allPassed = false;
-					break;
-				}
+				if (!pass) { allPassed = false; break; }
 			}
 		}
 	} finally {
-		// Run teardown commands
 		if (testCase.teardown) {
 			for (const cmd of testCase.teardown) {
-				console.log(`  [teardown] $ ${cmd}`);
-				const teardownResult = await shell.exec(cmd, 10000);
-				if (enableTrace) {
-					traceLines.push(JSON.stringify({
-						type: 'teardown',
-						command: cmd,
-						stdout: teardownResult.stdout,
-						exit_code: teardownResult.exitCode,
-						timestamp: new Date().toISOString(),
-					}));
-				}
+				const result = await shell.exec(cmd, 10000);
+				const line = { type: 'teardown', command: cmd, stdout: result.stdout, exit_code: result.exitCode, timestamp: new Date().toISOString() };
+				printTeardown(line);
+				if (enableTrace) traceLines.push(JSON.stringify(line));
 			}
 		}
 		shell.close();
@@ -551,39 +423,162 @@ CLI flags override environment variables.`);
 	const totalDuration = Date.now() - overallStart;
 	const endedAt = new Date().toISOString();
 
-	// stdout: brief summary
-	console.log('\n━━━ Summary ━━━');
 	const totalCount = stepResults.length;
 	const passedCount = stepResults.filter((r) => r.judgeVerdict === 'PASS').length;
 	const failedCount = stepResults.filter((r) => r.judgeVerdict === 'FAIL').length;
 	const skippedCount = stepResults.filter((r) => r.judgeVerdict === 'SKIP').length;
 
-	if (allPassed) {
-		console.log(`✅ All ${totalCount} steps passed!`);
-	} else {
-		console.log(`❌ ${passedCount}/${totalCount} steps passed`);
-	}
+	const summaryLine = {
+		type: 'summary',
+		total_steps: testCase.steps.length,
+		executed_steps: totalCount,
+		passed: passedCount,
+		failed: failedCount,
+		skipped: skippedCount,
+		result: allPassed ? 'PASS' : 'FAIL',
+		duration_ms: totalDuration,
+		ended_at: endedAt,
+		timestamp: endedAt,
+	};
+	printSummary(summaryLine, tracePath);
 
-	// Trace: summary (verbose)
 	if (enableTrace) {
-		traceLines.push(JSON.stringify({
-			type: 'summary',
-			total_steps: testCase.steps.length,
-			executed_steps: totalCount,
-			passed: passedCount,
-			failed: failedCount,
-			skipped: skippedCount,
-			result: allPassed ? 'PASS' : 'FAIL',
-			duration_ms: totalDuration,
-			ended_at: endedAt,
-			timestamp: endedAt,
-		}));
-
+		traceLines.push(JSON.stringify(summaryLine));
 		writeFileSync(tracePath, traceLines.join('\n') + '\n');
-		console.log(`📊 Trace: ${tracePath}`);
 	}
 
 	process.exit(allPassed ? 0 : 1);
+}
+
+// ─── cmdShow ──────────────────────────────────────────────────────
+
+async function cmdShow(tracePath) {
+	if (!existsSync(tracePath)) {
+		console.error(`Trace file not found: ${tracePath}`);
+		process.exit(1);
+	}
+
+	const raw = readFileSync(tracePath, 'utf-8');
+	const lines = raw.trim().split('\n').map((l) => JSON.parse(l));
+
+	let meta = null;
+	let totalSteps = 0;
+
+	for (const line of lines) {
+		switch (line.type) {
+			case 'meta':
+				meta = line;
+				totalSteps = line.total_steps ?? 0;
+				printBanner(line, tracePath);
+				break;
+			case 'setup':
+				printSetup(line);
+				break;
+			case 'step':
+				printStep(line, totalSteps);
+				break;
+			case 'teardown':
+				printTeardown(line);
+				break;
+			case 'summary':
+				printSummary(line, tracePath);
+				break;
+		}
+	}
+
+	process.exit(0);
+}
+
+// ─── Main ───────────────────────────────────────────────────────────
+
+async function main() {
+	const args = process.argv.slice(2);
+
+	// Subcommand detection
+	const subcommand = args[0];
+	const rest = args.slice(1);
+
+	if (subcommand === 'run') {
+		const { values, positionals } = parseArgs({
+			options: {
+				'api-key': { type: 'string' },
+				'base-url': { type: 'string' },
+				model: { type: 'string' },
+				output: { type: 'string', short: 'o' },
+				'no-trace': { type: 'boolean', default: false },
+				'dry-run': { type: 'boolean', default: false },
+			},
+			allowPositionals: true,
+			args: rest,
+		});
+
+		if (positionals.length === 0) {
+			console.error('Usage: atest run <spec.yaml> [options]');
+			process.exit(1);
+		}
+
+		await cmdRun(positionals[0], values);
+	} else if (subcommand === 'show') {
+		const { positionals } = parseArgs({
+			allowPositionals: true,
+			args: rest,
+		});
+
+		if (positionals.length === 0) {
+			console.error('Usage: atest show <trace.jsonl>');
+			process.exit(1);
+		}
+
+		await cmdShow(positionals[0]);
+	} else if (subcommand === '--version' || subcommand === '-V') {
+		console.log(`atest ${pkg.version}`);
+		process.exit(0);
+	} else if (subcommand === '--help' || subcommand === '-h') {
+		printHelp();
+		process.exit(0);
+	} else if (subcommand && !subcommand.startsWith('-')) {
+		// Shorthand: atest <spec.yaml> = atest run <spec.yaml>
+		const { values, positionals } = parseArgs({
+			options: {
+				'api-key': { type: 'string' },
+				'base-url': { type: 'string' },
+				model: { type: 'string' },
+				output: { type: 'string', short: 'o' },
+				'no-trace': { type: 'boolean', default: false },
+				'dry-run': { type: 'boolean', default: false },
+			},
+			allowPositionals: true,
+		});
+
+		await cmdRun(positionals[0], values);
+	} else {
+		printHelp();
+		process.exit(subcommand ? 1 : 0);
+	}
+}
+
+function printHelp() {
+	console.log(`atest ${pkg.version} — LLM-judged CLI test runner
+
+Usage:
+  atest run <spec.yaml> [options]   Execute spec, judge with LLM
+  atest show <trace.jsonl>           Replay trace as human-readable output
+  atest <spec.yaml> [options]        Shorthand for "atest run"
+
+Options (run):
+  --api-key <key>       LLM API key (or ATEST_API_KEY env)
+  --base-url <url>      LLM endpoint (or ATEST_BASE_URL env)
+  --model <name>        Model name (or ATEST_MODEL env, required for LLM judgment)
+  -o, --output <path>   JSONL trace path (default: <stem>-<timestamp>.jsonl)
+  --no-trace            Disable trace output
+  --dry-run             Execute commands, skip LLM judgment
+
+Environment:
+  ATEST_API_KEY         LLM API key
+  ATEST_BASE_URL        LLM API endpoint
+  ATEST_MODEL           LLM model name (required for LLM judgment)
+
+CLI flags override environment variables.`);
 }
 
 main().catch((err) => {
