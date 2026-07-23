@@ -29,6 +29,7 @@ steps:
 
 - **持久 shell** — 步骤间共享状态（`cd`、`export`、文件操作都保留），模拟真实工作流
 - **两种步骤** — 有 `judge_prompt` 的走 LLM 判定；没有的走 exit code 自动判定（省 token）
+- **异步重试** — 配置 `retry` 后，判定可返回 RETRY 等待后重试，支持固定/指数退避
 - **trace 回放** — `atest show trace.jsonl` 完整复现运行时输出，不重跑命令
 - **FAIL 即停** — 一步失败后续不执行，teardown 照跑，不会把系统搞坏
 
@@ -167,6 +168,9 @@ jq 'select(.type=="step" and .judge_verdict=="FAIL")' my-test-*.jsonl
 # Show per-step cwd
 jq -r 'select(.type=="step") | "[\(.index)] \(.cwd) $ \(.command)"' my-test-*.jsonl
 
+# Show retry history for a step
+jq -r 'select(.type=="step" and .index==2) | "attempt \(.attempt): \(.judge_verdict) — \(.judge_reason)"' my-test-*.jsonl
+
 # Replay as human-readable
 atest show my-test-20260723-120000.jsonl
 ```
@@ -188,6 +192,10 @@ steps:                          # required, TestStep[]
   - command: "some command"     #   required, shell command
     judge_prompt: "expected"    #   optional — if omitted, auto-judge by exit code
     timeout: 30                 #   optional, seconds (default: 30)
+    retry:                      #   optional — retry config for async operations
+      max: 3                    #     max retries (default: 3)
+      interval: 10              #     seconds between retries (default: 10)
+      backoff: false            #     false=fixed, true=exponential (default: false)
 ```
 
 ### Two types of steps
@@ -205,6 +213,42 @@ LLM reads the output + judge_prompt and returns PASS/FAIL.
 - command: "mkdir -p build"
 ```
 Auto-judged by exit code: 0 = PASS, non-zero = FAIL. No LLM call needed.
+
+### Retry / async steps
+
+Some operations are async — a service might need time to start, a resource might be creating. Instead of guessing `sleep N`, configure `retry` and let the step poll until ready.
+
+**How it works:**
+
+| Has `judge_prompt` | Has `retry` | RETRY triggered by | LLM call? |
+|:-:|:-:|---|:-:|
+| ✅ | ✅ | LLM returns `VERDICT: RETRY` | ✅ |
+| ✅ | ❌ | N/A (PASS/FAIL only) | ✅ |
+| ❌ | ✅ | exit code non-zero | ❌ |
+| ❌ | ❌ | N/A (PASS/FAIL only) | ❌ |
+
+**Transition step with retry** (no LLM needed — pure polling):
+```yaml
+- command: "curl -sf http://localhost:8080/health"
+  retry:
+    max: 10
+    interval: 5
+    backoff: false
+```
+Tries every 5s, up to 10 retries. Exit 0 = PASS, non-zero = RETRY.
+
+**Judged step with retry** (LLM can distinguish "not ready" vs "broken"):
+```yaml
+- command: "curl -s http://localhost:8080/api/status | jq -r '.state'"
+  judge_prompt: "输出应为 'running' 或 'healthy'"
+  retry:
+    max: 5
+    interval: 10
+    backoff: true    # 10s → 20s → 40s → 80s → 160s
+```
+LLM sees output like `"starting"` → returns RETRY → wait → try again. If output is `"error"`, LLM returns FAIL immediately (not RETRY).
+
+**Backoff:** `backoff: false` = fixed interval. `backoff: true` = exponential (`interval × 2^attempt`).
 
 ### judge_prompt tips
 

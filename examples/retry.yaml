@@ -1,0 +1,30 @@
+# Example: retry / async steps
+# Run: atest run examples/retry.yaml
+
+name: "Retry examples"
+description: "Demonstrate retry on transition and judged steps"
+
+setup:
+  - "rm -f /tmp/atest-retry-demo"
+
+steps:
+  # Transition step with retry — no LLM needed
+  # Creates marker on first attempt, passes on second
+  - command: "test -f /tmp/atest-retry-demo || (touch /tmp/atest-retry-demo; false)"
+    retry:
+      max: 3
+      interval: 1
+      backoff: false
+
+  # Regular transition step
+  - command: "echo marker exists"
+
+  # Transition step with retry that exhausts (always fails)
+  # Uncomment to test:
+  # - command: "false"
+  #   retry:
+  #     max: 2
+  #     interval: 1
+
+teardown:
+  - "rm -f /tmp/atest-retry-demo"

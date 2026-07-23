@@ -30,6 +30,12 @@ import { parse } from 'yaml';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf-8'));
 
+// ─── Helpers ──────────────────────────────────────────────────────
+
+function sleep(ms) {
+	return new Promise((r) => setTimeout(r, ms));
+}
+
 // ─── Judge System Prompt ───────────────────────────────────────────
 
 const JUDGE_SYSTEM_PROMPT = `You are a CLI test judge. You are given a sequence of terminal commands and their outputs from a test case. For each step, you receive the command, its output (with exit code), and the expected criteria (judge prompt).
@@ -44,7 +50,11 @@ Or:
 VERDICT: FAIL
 REASON: <one sentence explanation of what went wrong>
 
-Be strict but fair. Only PASS when the output clearly meets the criteria. The exit code is shown as [exit: N] — non-zero exit usually means failure unless the criteria expects it.`;
+Or (only when the step has retry enabled):
+VERDICT: RETRY
+REASON: <one sentence explanation of what is still pending>
+
+Be strict but fair. Only PASS when the output clearly meets the criteria. Use RETRY when the output suggests the operation is in progress and might succeed if we wait longer (e.g., service is starting, resource is being created). The exit code is shown as [exit: N] — non-zero exit usually means failure unless the criteria expects it.`;
 
 // ─── Persistent Shell ──────────────────────────────────────────────
 
@@ -140,16 +150,19 @@ async function callJudge({ messages, apiKey, baseUrl, model }) {
 }
 
 function parseJudgeResponse(response) {
-	const passMatch = response.match(/VERDICT:\s*(PASS|FAIL)/i);
+	const match = response.match(/VERDICT:\s*(PASS|FAIL|RETRY)/i);
 	const reasonMatch = response.match(/REASON:\s*(.+)/i);
-	const pass = passMatch ? passMatch[1].toUpperCase() === 'PASS' : false;
+	const verdict = match ? match[1].toUpperCase() : 'FAIL';
 	const reason = reasonMatch ? reasonMatch[1].trim() : response.slice(0, 200);
-	return { pass, reason };
+	return { verdict, reason };
 }
 
 // ─── Context Assembly ─────────────────────────────────────────────
 
 function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
+	const step = testCase.steps[currentStepIndex];
+	const retryEnabled = !!step.retry;
+
 	const messages = [
 		{ role: 'system', content: JUDGE_SYSTEM_PROMPT },
 		{
@@ -159,7 +172,7 @@ function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 	];
 
 	for (let i = 0; i <= currentStepIndex; i++) {
-		const step = testCase.steps[i];
+		const s = testCase.steps[i];
 		const result = stepResults[i];
 
 		messages.push({
@@ -168,7 +181,7 @@ function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 			tool_calls: [{
 				id: `call_${i + 1}`,
 				type: 'function',
-				function: { name: 'terminal', arguments: JSON.stringify({ command: step.command }) },
+				function: { name: 'terminal', arguments: JSON.stringify({ command: s.command }) },
 			}],
 		});
 
@@ -179,13 +192,13 @@ function assembleJudgeMessages(testCase, stepResults, currentStepIndex) {
 		});
 
 		if (i < currentStepIndex) {
-			messages.push({ role: 'user', content: `Step ${i + 1} 预期: ${step.judge_prompt}` });
+			messages.push({ role: 'user', content: `Step ${i + 1} 预期: ${s.judge_prompt}` });
 			messages.push({ role: 'assistant', content: `VERDICT: PASS\nREASON: ${result.judgeReason ?? 'Passed'}` });
 		} else {
-			messages.push({
-				role: 'user',
-				content: `Step ${i + 1} 预期: ${step.judge_prompt}\n\n判定 PASS 或 FAIL，给出原因。`,
-			});
+			const instruction = retryEnabled
+				? `Step ${i + 1} 预期: ${s.judge_prompt}\n\n判定 PASS、FAIL 或 RETRY（如操作正在进行中，等待后可能成功），给出原因。`
+				: `Step ${i + 1} 预期: ${s.judge_prompt}\n\n判定 PASS 或 FAIL，给出原因。`;
+			messages.push({ role: 'user', content: instruction });
 		}
 	}
 
@@ -219,12 +232,15 @@ function printSetup(line) {
 }
 
 function printStep(line, totalSteps) {
-	console.log(`\n━━━ Step ${line.index + 1}/${totalSteps} ━━━`);
+	const attemptStr = line.attempt > 0 ? ` (retry ${line.attempt})` : '';
+	console.log(`\n━━━ Step ${line.index + 1}/${totalSteps}${attemptStr} ━━━`);
 	console.log(`  $ ${line.command}`);
 	console.log(`  ${truncateOutput(line.stdout)}`);
 	console.log(`  [exit: ${line.exit_code}]`);
 
-	if (line.judge_verdict === 'PASS') {
+	if (line.judge_verdict === 'RETRY') {
+		console.log(`  🔄 RETRY: ${line.judge_reason}`);
+	} else if (line.judge_verdict === 'PASS') {
 		console.log(`  ✅ PASS: ${line.judge_reason}`);
 	} else {
 		console.log(`  ❌ FAIL: ${line.judge_reason}`);
@@ -242,6 +258,9 @@ function printSummary(line, tracePath) {
 	} else {
 		console.log(`❌ ${line.passed}/${line.executed_steps} steps passed`);
 	}
+	if (line.retried > 0) {
+		console.log(`🔄 ${line.retried} step(s) needed retry`);
+	}
 	if (tracePath) {
 		console.log(`📊 Trace: ${tracePath}`);
 	}
@@ -258,6 +277,23 @@ function timestamp() {
 function defaultTracePath(specPath) {
 	const stem = basename(specPath).replace(/\.ya?ml$/, '');
 	return join(process.cwd(), `${stem}-${timestamp()}.jsonl`);
+}
+
+// ─── Retry helpers ─────────────────────────────────────────────────
+
+function getRetryConfig(step) {
+	if (!step.retry) return null;
+	const r = typeof step.retry === 'object' ? step.retry : {};
+	return {
+		max: r.max ?? 3,
+		interval: r.interval ?? 10,
+		backoff: r.backoff ?? false,
+	};
+}
+
+function waitTime(rc, attempt) {
+	if (!rc) return 0;
+	return rc.backoff ? rc.interval * Math.pow(2, attempt) : rc.interval;
 }
 
 // ─── cmdRun ───────────────────────────────────────────────────────
@@ -338,56 +374,118 @@ async function cmdRun(specPath, opts) {
 		for (let i = 0; i < testCase.steps.length; i++) {
 			const step = testCase.steps[i];
 			const timeout = (step.timeout ?? 30) * 1000;
-			const stepStart = Date.now();
+			const rc = getRetryConfig(step);
 
-			const result = await shell.exec(step.command, timeout);
-			const stepDuration = Date.now() - stepStart;
-			const stepTimestamp = new Date().toISOString();
+			let attempt = 0;
+			let stepDone = false;
 
-			stepResults.push({ ...result, judgeReason: null });
+			while (!stepDone) {
+				const stepStart = Date.now();
+				const result = await shell.exec(step.command, timeout);
+				const stepDuration = Date.now() - stepStart;
+				const stepTimestamp = new Date().toISOString();
 
-			if (step.judge_prompt) {
-				// LLM judgment
-				const messages = assembleJudgeMessages(testCase, stepResults, i);
-				const judgeResponse = await callJudge({ messages, apiKey, baseUrl, model });
-				const { pass, reason } = parseJudgeResponse(judgeResponse);
+				// Store result for this attempt (overwrites on retry)
+				stepResults[i] = { ...result, judgeReason: null };
 
-				stepResults[i].judgeReason = reason;
-				stepResults[i].judgeVerdict = pass ? 'PASS' : 'FAIL';
+				if (step.judge_prompt) {
+					// LLM judgment
+					const messages = assembleJudgeMessages(testCase, stepResults, i);
+					const judgeResponse = await callJudge({ messages, apiKey, baseUrl, model });
+					const { verdict, reason } = parseJudgeResponse(judgeResponse);
 
-				const line = {
-					type: 'step', index: i, command: step.command, stdout: result.stdout,
-					exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
-					judge_prompt: step.judge_prompt, judge_verdict: pass ? 'PASS' : 'FAIL',
-					judge_reason: reason, judge_raw: judgeResponse, judge_method: 'llm',
-					duration_ms: stepDuration, timestamp: stepTimestamp,
-				};
-				printStep(line, testCase.steps.length);
-				if (enableTrace) traceLines.push(JSON.stringify(line));
+					stepResults[i].judgeReason = reason;
+					stepResults[i].judgeVerdict = verdict;
 
-				if (!pass) { allPassed = false; break; }
-			} else {
-				// Transition step — auto-judge by exit code
-				const pass = result.exitCode === 0;
-				const reason = pass
-					? `exit code 0 (transition step)`
-					: `exit code ${result.exitCode} (transition step, expected 0)`;
+					if (verdict === 'RETRY' && rc && attempt < rc.max) {
+						// RETRY — wait and try again
+						const line = {
+							type: 'step', index: i, attempt, command: step.command, stdout: result.stdout,
+							exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
+							judge_prompt: step.judge_prompt, judge_verdict: 'RETRY',
+							judge_reason: reason, judge_raw: judgeResponse, judge_method: 'llm',
+							duration_ms: stepDuration, timestamp: stepTimestamp,
+						};
+						printStep(line, testCase.steps.length);
+						if (enableTrace) traceLines.push(JSON.stringify(line));
 
-				stepResults[i].judgeReason = reason;
-				stepResults[i].judgeVerdict = pass ? 'PASS' : 'FAIL';
+						const wait = waitTime(rc, attempt);
+						await sleep(wait * 1000);
+						attempt++;
+						continue;
+					}
 
-				const line = {
-					type: 'step', index: i, command: step.command, stdout: result.stdout,
-					exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
-					judge_prompt: null, judge_verdict: pass ? 'PASS' : 'FAIL',
-					judge_reason: reason, judge_raw: null, judge_method: 'exit_code',
-					duration_ms: stepDuration, timestamp: stepTimestamp,
-				};
-				printStep(line, testCase.steps.length);
-				if (enableTrace) traceLines.push(JSON.stringify(line));
+					// Final verdict (PASS, FAIL, or RETRY exhausted → FAIL)
+					const finalVerdict = verdict === 'RETRY' ? 'FAIL' : verdict;
+					const finalReason = verdict === 'RETRY'
+						? `max retries (${rc.max}) exceeded: ${reason}`
+						: reason;
 
-				if (!pass) { allPassed = false; break; }
+					stepResults[i].judgeVerdict = finalVerdict;
+					stepResults[i].judgeReason = finalReason;
+					stepResults[i].attempt = attempt;
+
+					const line = {
+						type: 'step', index: i, attempt, command: step.command, stdout: result.stdout,
+						exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
+						judge_prompt: step.judge_prompt, judge_verdict: finalVerdict,
+						judge_reason: finalReason, judge_raw: judgeResponse, judge_method: 'llm',
+						duration_ms: stepDuration, timestamp: stepTimestamp,
+					};
+					printStep(line, testCase.steps.length);
+					if (enableTrace) traceLines.push(JSON.stringify(line));
+
+					if (finalVerdict !== 'PASS') { allPassed = false; }
+					stepDone = true;
+
+				} else {
+					// Transition step — auto-judge by exit code
+					const pass = result.exitCode === 0;
+
+					if (!pass && rc && attempt < rc.max) {
+						// RETRY for transition step
+						const line = {
+							type: 'step', index: i, attempt, command: step.command, stdout: result.stdout,
+							exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
+							judge_prompt: null, judge_verdict: 'RETRY',
+							judge_reason: `exit code ${result.exitCode}, retrying`, judge_raw: null, judge_method: 'exit_code',
+							duration_ms: stepDuration, timestamp: stepTimestamp,
+						};
+						printStep(line, testCase.steps.length);
+						if (enableTrace) traceLines.push(JSON.stringify(line));
+
+						const wait = waitTime(rc, attempt);
+						await sleep(wait * 1000);
+						attempt++;
+						continue;
+					}
+
+					const finalVerdict = pass ? 'PASS' : 'FAIL';
+					const reason = pass
+						? 'exit code 0 (transition step)'
+						: rc
+							? `exit code ${result.exitCode} (transition step, max retries (${rc.max}) exceeded)`
+							: `exit code ${result.exitCode} (transition step, expected 0)`;
+
+					stepResults[i].judgeReason = reason;
+					stepResults[i].judgeVerdict = finalVerdict;
+					stepResults[i].attempt = attempt;
+
+					const line = {
+						type: 'step', index: i, attempt, command: step.command, stdout: result.stdout,
+						exit_code: result.exitCode, timed_out: result.timedOut ?? false, cwd: result.cwd,
+						judge_prompt: null, judge_verdict: finalVerdict,
+						judge_reason: reason, judge_raw: null, judge_method: 'exit_code',
+						duration_ms: stepDuration, timestamp: stepTimestamp,
+					};
+					printStep(line, testCase.steps.length);
+					if (enableTrace) traceLines.push(JSON.stringify(line));
+
+					if (!pass) { allPassed = false; }
+					stepDone = true;
+				}
 			}
+			if (!allPassed) break;
 		}
 	} finally {
 		if (testCase.teardown) {
@@ -407,6 +505,7 @@ async function cmdRun(specPath, opts) {
 	const totalCount = stepResults.length;
 	const passedCount = stepResults.filter((r) => r.judgeVerdict === 'PASS').length;
 	const failedCount = stepResults.filter((r) => r.judgeVerdict === 'FAIL').length;
+	const retriedCount = stepResults.filter((r) => (r.attempt ?? 0) > 0).length;
 
 	const summaryLine = {
 		type: 'summary',
@@ -414,6 +513,7 @@ async function cmdRun(specPath, opts) {
 		executed_steps: totalCount,
 		passed: passedCount,
 		failed: failedCount,
+		retried: retriedCount,
 		result: allPassed ? 'PASS' : 'FAIL',
 		duration_ms: totalDuration,
 		ended_at: endedAt,
@@ -482,8 +582,8 @@ async function main() {
 				'base-url': { type: 'string' },
 				model: { type: 'string' },
 				output: { type: 'string', short: 'o' },
-			'no-trace': { type: 'boolean', default: false },
-			help: { type: 'boolean', short: 'h' },
+				'no-trace': { type: 'boolean', default: false },
+				help: { type: 'boolean', short: 'h' },
 			},
 			allowPositionals: true,
 			args: rest,

@@ -4,6 +4,15 @@
 
 // ─── Test Spec (YAML input) ───────────────────────────────────────
 
+export interface RetryConfig {
+	/** Max retry attempts (not counting the first try). Default: 3 */
+	max?: number;
+	/** Seconds to wait between retries. Default: 10 */
+	interval?: number;
+	/** false = fixed interval, true = exponential backoff (interval × 2^attempt). Default: false */
+	backoff?: boolean;
+}
+
 export interface TestSpec {
 	/** Test case name (shown in stdout + trace meta) */
 	name: string;
@@ -33,14 +42,22 @@ export interface TestStep {
 	command: string;
 
 	/**
-	 * Criteria for the LLM to judge PASS/FAIL (natural language).
+	 * Criteria for the LLM to judge PASS/FAIL/RETRY (natural language).
 	 * If omitted, this is a "transition step" — auto-judged by exit code
-	 * (0 = PASS, non-zero = FAIL), no LLM call.
+	 * (0 = PASS, non-zero = FAIL or RETRY if retry configured), no LLM call.
 	 */
 	judge_prompt?: string;
 
-	/** Timeout in seconds (default: 30) */
+	/** Timeout in seconds for the command itself (default: 30) */
 	timeout?: number;
+
+	/**
+	 * Retry configuration for async/long-running operations.
+	 * When enabled, the step can return RETRY and be re-executed after waiting.
+	 * For judged steps: LLM can return RETRY verdict.
+	 * For transition steps: non-zero exit code triggers RETRY.
+	 */
+	retry?: RetryConfig;
 }
 
 // ─── Trace JSONL (output) ─────────────────────────────────────────
@@ -50,6 +67,7 @@ export interface TraceMeta {
 	type: 'meta';
 	name: string | null;
 	description: string | null;
+	cwd: string;
 	model: string;
 	base_url: string | null;
 	total_steps: number;
@@ -66,10 +84,12 @@ export interface TraceLifecycle {
 	timestamp: string; // ISO 8601
 }
 
-/** One per test step — the verbose record */
+/** One per test step attempt — the verbose record */
 export interface TraceStep {
 	type: 'step';
 	index: number;
+	/** Retry attempt number (0 = first try, 1 = first retry, etc.) */
+	attempt: number;
 	command: string;
 	stdout: string;
 	exit_code: number;
@@ -77,7 +97,7 @@ export interface TraceStep {
 	/** Working directory at the time this step executed (after any cd in prior steps) */
 	cwd: string | null;
 	judge_prompt: string | null;
-	judge_verdict: 'PASS' | 'FAIL';
+	judge_verdict: 'PASS' | 'FAIL' | 'RETRY';
 	judge_reason: string;
 	/** Full raw LLM response (null for transition steps) */
 	judge_raw: string | null;
@@ -94,6 +114,8 @@ export interface TraceSummary {
 	executed_steps: number;
 	passed: number;
 	failed: number;
+	/** Number of steps that needed at least one retry */
+	retried: number;
 	result: 'PASS' | 'FAIL';
 	duration_ms: number;
 	ended_at: string; // ISO 8601
