@@ -2,8 +2,6 @@
 name: "System commands"
 description: "Verify common system commands work correctly"
 
-cwd: /tmp
-
 setup:
   - "rm -rf /tmp/atest-demo"
   - "mkdir -p /tmp/atest-demo"
@@ -13,10 +11,16 @@ steps:
     judge_prompt: "输出应包含 'hello atest'"
     timeout: 5
 
-  - command: "cd /tmp/atest-demo && pwd"
-    judge_prompt: "输出应为 /tmp/atest-demo"
+  # Transition step — no judge_prompt, auto-judge by exit code
+  - command: "cd /tmp/atest-demo"
 
-  - command: "printf 'line1\nline2\nline3\n' > file.txt && cat file.txt"
+  - command: "pwd"
+    judge_prompt: "输出应包含 /tmp/atest-demo"
+
+  - command: "printf 'line1\nline2\nline3\n' > file.txt"
+    judge_prompt: "无报错，文件创建成功"
+
+  - command: "cat file.txt"
     judge_prompt: "输出应有 3 行，分别为 line1、line2、line3"
 
   - command: "wc -l file.txt | awk '{print $1}'"
@@ -26,7 +30,7 @@ steps:
     judge_prompt: "输出应为 Linux 或 Darwin"
 
   - command: "sleep 2 && echo 'done'"
-    judge_prompt: "输出应包含 'done'，证明 sleep 命令正常完成"
+    judge_prompt: "输出应包含 'done'，证明 sleep 正常完成"
     timeout: 10
 
   - command: "false"
