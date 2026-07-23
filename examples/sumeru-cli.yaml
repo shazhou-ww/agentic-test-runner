@@ -1,0 +1,23 @@
+# Test case: sumeru CLI basic flow
+# Run: node index.mjs examples/sumeru-cli.yaml --provider dashscope
+
+name: "sumeru CLI basic flow"
+description: "Test sumeru CLI version, workflow list, and session operations"
+
+cwd: /tmp
+
+setup:
+  - "rm -rf /tmp/sumeru-test"
+
+steps:
+  - command: "sumeru --version"
+    judge_prompt: "输出应包含版本号，格式为 x.y.z"
+
+  - command: "sumeru workflow list 2>&1 | head -20"
+    judge_prompt: "应列出至少 3 个 workflow"
+
+  - command: "sumeru session list --format json 2>&1 | head -5"
+    judge_prompt: "应返回 JSON 格式数据，包含 session 列表或空数组"
+
+teardown:
+  - "rm -rf /tmp/sumeru-test"

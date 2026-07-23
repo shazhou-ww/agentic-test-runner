@@ -1,0 +1,37 @@
+{
+  "name": "agentic-test-runner",
+  "version": "0.0.1",
+  "description": "LLM-judged CLI test runner — define test cases in YAML, execute commands, let an LLM judge PASS/FAIL. Outputs JSONL trace.",
+  "type": "module",
+  "main": "atest.js",
+  "bin": {
+    "atest": "./atest.js"
+  },
+  "scripts": {
+    "test": "node atest.js examples/basic.yaml --dry-run"
+  },
+  "keywords": [
+    "llm",
+    "testing",
+    "cli",
+    "test-runner",
+    "yaml",
+    "ai-judge",
+    "agentic",
+    "automation"
+  ],
+  "author": "Scott Wei <xiaomooo@shazhou.work>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "atest.js",
+    "README.md",
+    "examples/",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "yaml": "^2.5.0"
+  }
+}
