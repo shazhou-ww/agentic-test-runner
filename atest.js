@@ -29,10 +29,13 @@
 
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join, basename, dirname, resolve } from 'node:path';
-
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { parse } from 'yaml';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf-8'));
 
 // ─── Judge System Prompt ───────────────────────────────────────────
 
@@ -254,7 +257,7 @@ function defaultTracePath(testCasePath) {
 // ─── Main ───────────────────────────────────────────────────────────
 
 async function main() {
-	const { values, positionals } = parseArgs({
+const { values, positionals } = parseArgs({
 		options: {
 			'api-key': { type: 'string' },
 			'base-url': { type: 'string' },
@@ -262,9 +265,40 @@ async function main() {
 			output: { type: 'string', short: 'o' },
 			'no-trace': { type: 'boolean', default: false },
 			'dry-run': { type: 'boolean', default: false },
+			version: { type: 'boolean', short: 'V' },
+			help: { type: 'boolean', short: 'h' },
 		},
 		allowPositionals: true,
 	});
+
+	if (values.help) {
+		console.log(`atest — LLM-judged CLI test runner
+
+Usage: atest <test-case.yaml> [options]
+
+Options:
+  --api-key <key>       LLM API key (or ATEST_API_KEY env)
+  --base-url <url>      LLM endpoint (or ATEST_BASE_URL env)
+  --model <name>        Model name (or ATEST_MODEL env, default: glm-5.2)
+  -o, --output <path>   JSONL trace path (default: <stem>-<timestamp>.jsonl)
+  --no-trace            Disable trace output
+  --dry-run             Execute commands, skip LLM judgment
+  -V, --version         Print version and exit
+  -h, --help            Show this help and exit
+
+Environment:
+  ATEST_API_KEY         LLM API key
+  ATEST_BASE_URL        LLM API endpoint
+  ATEST_MODEL           LLM model name (default: glm-5.2)
+
+CLI flags override environment variables.`);
+		process.exit(0);
+	}
+
+	if (values.version) {
+		console.log(`atest ${pkg.version}`);
+		process.exit(0);
+	}
 
 	if (positionals.length === 0) {
 		console.error('Usage: atest <test-case.yaml> [options]');
