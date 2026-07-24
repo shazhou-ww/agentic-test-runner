@@ -57,6 +57,27 @@ describe('TestSpecSchema', () => {
 		const result = TestStepSchema.safeParse({ command: '' });
 		assert.ok(!result.success);
 	});
+
+	it('validates a spec with env list', () => {
+		const spec = {
+			name: 'env test',
+			env: ['API_KEY', 'BASE_URL'],
+			steps: [{ command: 'echo $API_KEY' }],
+		};
+		const result = TestSpecSchema.safeParse(spec);
+		assert.ok(result.success);
+		assert.deepEqual(result.data!.env, ['API_KEY', 'BASE_URL']);
+	});
+
+	it('rejects env with empty string', () => {
+		const spec = {
+			name: 'bad env',
+			env: ['API_KEY', ''],
+			steps: [{ command: 'echo hi' }],
+		};
+		const result = TestSpecSchema.safeParse(spec);
+		assert.ok(!result.success);
+	});
 });
 
 describe('JudgeSchema', () => {

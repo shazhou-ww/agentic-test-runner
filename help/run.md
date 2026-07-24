@@ -29,6 +29,9 @@ Spec format (YAML):
     - "mkdir -p /tmp/work"
   teardown:                      # optional, always runs (even on FAIL)
     - "rm -rf /tmp/work"
+  env:                           # optional, required env vars (fail fast if missing)
+    - API_KEY
+    - BASE_URL
   steps:                         # required
     - command: "some command"   #   required, shell command
       judge:                     #   optional — omit for transition step

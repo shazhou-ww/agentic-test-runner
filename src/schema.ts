@@ -42,6 +42,7 @@ export const TestSpecSchema = z.object({
 	name: z.string(),
 	description: z.string().optional(),
 	cwd: z.string().optional(),
+	env: z.array(z.string().min(1)).optional(),
 	setup: z.array(z.string()).optional(),
 	teardown: z.array(z.string()).optional(),
 	steps: z.array(TestStepSchema).min(1),

@@ -60,6 +60,8 @@ export interface TestSpec {
 	 * Relative to the spec file's location. Machine-independent.
 	 */
 	cwd?: string;
+	/** Required environment variables. Checked at startup, fail fast if missing. */
+	env?: string[];
 	/** Commands to run before steps (not judged) */
 	setup?: string[];
 	/** Commands to run after steps (always runs, even on FAIL) */

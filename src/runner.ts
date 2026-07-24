@@ -74,6 +74,15 @@ export async function cmdRun(specPath: string, opts: RunOptions): Promise<void> 
 		process.exit(1);
 	}
 
+	// Validate required env vars (fail fast)
+	if (testCase.env) {
+		const missing = testCase.env.filter((k) => !process.env[k]);
+		if (missing.length > 0) {
+			console.error(`Missing required environment variables: ${missing.join(', ')}`);
+			process.exit(1);
+		}
+	}
+
 	const resolved = resolveConfig(opts);
 	const apiKey = resolved.api_key.value;
 	const baseUrl = resolved.base_url.value;
