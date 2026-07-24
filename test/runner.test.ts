@@ -37,7 +37,7 @@ describe('CLI', () => {
 	it('shows help with --help', () => {
 		const result = runAtest(['--help']);
 		assert.equal(result.exitCode, 0);
-		assert.match(result.stdout, /Usage:/);
+		assert.match(result.stdout, /judge:/);
 	});
 
 	it('errors on unknown command', () => {

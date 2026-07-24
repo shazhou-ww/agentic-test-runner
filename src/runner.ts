@@ -12,6 +12,7 @@ import {
 	printSummary,
 	defaultTracePath,
 } from './trace.js';
+import { resolveConfig } from './config.js';
 import type {
 	JudgeContext,
 	RunOptions,
@@ -73,21 +74,22 @@ export async function cmdRun(specPath: string, opts: RunOptions): Promise<void> 
 		process.exit(1);
 	}
 
-	const apiKey = opts['api-key'] ?? process.env.ATEST_API_KEY ?? '';
-	const baseUrl = opts['base-url'] ?? process.env.ATEST_BASE_URL ?? '';
-	const model = opts.model ?? process.env.ATEST_MODEL ?? '';
+	const resolved = resolveConfig(opts);
+	const apiKey = resolved.api_key.value;
+	const baseUrl = resolved.base_url.value;
+	const model = resolved.model.value;
 
 	const needsLLM = testCase.steps.some((s) => s.judge?.type === 'llm');
 	if (needsLLM && !apiKey) {
-		console.error('No API key. Set ATEST_API_KEY or use --api-key');
+		console.error('No API key. Run: atest config set api_key <key>');
 		process.exit(1);
 	}
 	if (needsLLM && !baseUrl) {
-		console.error('No base URL. Set ATEST_BASE_URL or use --base-url');
+		console.error('No base URL. Run: atest config set base_url <url>');
 		process.exit(1);
 	}
 	if (needsLLM && !model) {
-		console.error('No model. Set ATEST_MODEL or use --model');
+		console.error('No model. Run: atest config set model <name>');
 		process.exit(1);
 	}
 
